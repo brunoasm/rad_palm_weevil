@@ -1,0 +1,709 @@
+---
+title: "Cross validation results"
+output: html_notebook
+---
+
+We used Cannon cluster at Harvard to run bedassle for all species. Now we will load the results and make a table with $\alpha$ parameters inferred.
+
+```{r}
+rm(list=ls())
+library(rstan)
+library(rstantools)
+library(tidyverse)
+library(broom)
+library(ggthemes)
+```
+
+# Get estimates
+
+We will first run one example for **Anchylorhynchus trapezicollis** OTU 1 and then apply the same procedures as a function to all species.
+
+Let's start by loading the table with model chosen for each species by cross validation, so we know how many parameters to expect.
+```{r}
+best_models = readr::read_csv('bedassle_results/best_models.csv')
+best_models
+```
+
+
+It will be easier to use this if we have columns with TRUE/FALSE for each distance matrix, so let's create those columns:
+
+```{r}
+best_models = best_models %>%
+  mutate(geo=str_detect(model,'g'),
+         plant=str_detect(model,'p'),
+         clim=str_detect(model,'c'))
+
+best_models
+```
+
+Now, let's load the rstan model for **Anchylorhynchus trapezicollis** OTU 1:
+
+```{r}
+species = 'Anchylorhynchus_1'
+load(str_c('bedassle_results/',species,'_model.fit.Robj'))
+```
+
+Each model can be diagnosed interactively with `shinystan::launch_shinystan(model.fit)`. We will do that below for all species, and for now will proceed to summarizing the posterior distributions by their mean and 95% credibility interval.
+
+```{r}
+estimates = summary(model.fit, pars=c('alphaE','alphaD','alpha2'))$summary %>%
+  as.data.frame() %>%
+  rownames_to_column('parameter') %>%
+  dplyr::select(parameter,mean,`2.5%`,`97.5%`) %>%
+  mutate_at(vars(-parameter),sprintf,fmt='%0.4f') %>%
+  mutate(posterior=str_c(mean,' (',`2.5%`,'--',`97.5%`,')')) %>%
+  select(parameter, posterior)
+
+estimates
+```
+
+Now let's change parameter names to reflect to which distance they refer to. We will start by making a named vector to translate names
+
+```{r}
+translation = c('alpha2'='$\alpha_2$',
+                'alphaD'='$\alpha_{geo}$')
+
+if (best_models$plant[best_models$species == species] &
+    best_models$clim[best_models$species == species]){
+  translation = c(translation,
+                  c('alphaE[1]' = '$\alpha_{plant}$',
+                    'alphaE[2]' = '$\alpha_{clim}$'))
+} else if (best_models$plant[best_models$species == species]) {
+  translation = c(translation,
+                  c('alphaE[1]' = '$\alpha_{plant}$'))
+} else if (best_models$clim[best_models$species == species]) {
+  translation = c(translation,
+                  c('alphaE[1]' = '$\alpha_{clim}$'))
+}
+```
+
+Now it is easy to use this vector.
+
+```{r}
+estimates = estimates %>%
+  mutate(parameter = translation[parameter])
+```
+
+Now that we know how this works, let's do it for all species.
+
+```{r}
+get_posteriors = function(species){
+  
+  load(str_c('bedassle_results/',species,'_model.fit.Robj'))
+  
+  
+  
+  estimates = summary(model.fit, 
+                      pars=intersect(c('alphaE[1]',
+                                       'alphaE[2]',
+                                       'alpha0',
+                                       'gamma',
+                                       'alphaD',
+                                       'alpha2'),
+                                     names(model.fit))) %>%
+    .[['summary']] %>%
+    as.data.frame() %>%
+    rownames_to_column('parameter') %>%
+    dplyr::select(parameter,mean,`2.5%`,`97.5%`) %>%
+    mutate_at(vars(-parameter),sprintf,fmt='%0.4f') %>%
+    mutate(posterior=str_c(mean,' (',`2.5%`,'--',`97.5%`,')')) %>%
+    dplyr::select(parameter, posterior)
+  
+  translation = c('alpha2'='$\\alpha_2$',
+                  'alpha0'='$\\alpha_0$',
+                  'gamma'='$\\gamma$',
+                  'alphaD'='$\\alpha_{geo}$')
+  
+  if (best_models$plant[best_models$species == species] &
+      best_models$clim[best_models$species == species]){
+    translation = c(translation,
+                    c('alphaE[1]' = '$\\alpha_{plant}$',
+                      'alphaE[2]' = '$\\alpha_{clim}$'))
+  } else if (best_models$plant[best_models$species == species]) {
+    translation = c(translation,
+                    c('alphaE[1]' = '$\\alpha_{plant}$'))
+  } else if (best_models$clim[best_models$species == species]) {
+    translation = c(translation,
+                    c('alphaE[1]' = '$\\alpha_{clim}$'))
+  }
+  
+  return(estimates %>%
+           mutate(parameter = translation[parameter]))
+}
+```
+
+Now let's use `purrr` to run this for all species. Let's first create a vector with all species
+
+```{r}
+spp = list.files(path='bedassle_results/',pattern='.*_data.*') %>%
+  str_remove('_data.*')
+
+names(spp) = spp
+
+spp
+```
+
+Before getting the estimates, let's make sure that the HMC ran well, using shinystan to diagnose the runs. The interactive shinystan page will open in a separate window.
+
+```{r}
+for (sp in spp){
+  rm(model.fit)
+  load(str_c('bedassle_results/',sp,'_model.fit.Robj'))
+  readline(prompt = 'Press any key to continue')
+  shinystan::launch_shinystan(model.fit)
+}
+
+```
+
+
+
+Now let's get a dataframe with estimates for all species:
+
+```{r}
+rm(model.fit)
+all_spp_par = purrr::map_df(spp,get_posteriors,.id = 'species')
+```
+
+# Make table
+
+Finally, we just need to reshape the data frame to put it in the paper. Let's save it as a csv file for further editing.
+```{r}
+bedassle_table = all_spp_par %>%
+  spread(key=parameter,value=posterior)
+
+bedassle_table
+
+write_csv(bedassle_table,'bedassle_results/final_table.csv')
+```
+
+# Make figure
+
+Now let's make a figure with pairwise pi against geographical, plant and climate distances for all species. 
+
+To do that, we will load the data used in bedassle (pairwise pi and distances). Let's start with allele frequencies to obtain sample genetic covariances.
+```{r}
+add_dimnames = function(x, x_names){
+  dimnames(x) = x_names
+  return(x)
+}
+
+load(file = 'weevils_freq_data.Rdata')
+
+ppi = purrr::map_df(BEDASSLE_data,~bedassle::freqs2pairwisePi(.x$freqs/2) %>%
+                           add_dimnames(dimnames(.x$freqs)) %>%
+                           as.dist %>%
+                           broom::tidy(diagonal=F, upper=F),
+                           .id = 'species') %>%
+  rename(sample1 = item1,
+         sample2 = item2,
+         pi = distance)
+
+ppi %>% head
+```
+
+Now let's load data on the other distances and combine in this table.
+
+```{r}
+pops = readr::read_csv('weevil_data.csv',guess_max = 1000) %>%
+  select(genomics, population = pop_id_thesis) %>%
+  distinct 
+
+
+ppi = ppi %>% 
+  left_join(pops, by = c('sample1'='genomics')) %>%
+  rename(pop1 = population) %>%
+  left_join(pops, by = c('sample2'='genomics')) %>%
+  rename(pop2 = population)
+
+
+load(file = 'plant_distances.Rdata')
+load(file = 'worldclim/distances.Rdata')
+
+ppi =  ppi %>%
+  left_join(geo_dist %>%
+              as.dist() %>%
+              broom::tidy(diagonal=T, upper=F),
+            by = c('pop1'='item1',
+                   'pop2'='item2')) %>%
+  rename(geo_dist=distance)
+
+ppi =  ppi %>%
+  left_join(plant_dist %>%
+              as.dist() %>%
+              broom::tidy(diagonal=T, upper=F),
+            by = c('pop1'='item1',
+                   'pop2'='item2')) %>%
+  rename(plant_dist=distance)
+
+#ppi =  ppi %>%
+#  left_join(clim_dist %>%
+#              as.dist() %>%
+#              broom::tidy(diagonal=T, upper=F),
+#            by = c('pop1'='item1',
+#                   'pop2'='item2')) %>%
+#  rename(clim_dist=distance)
+
+ppi %>% head
+
+```
+
+Now let's reshape the table to use ggplot2 for plotting.
+
+```{r}
+ppi = ppi %>%
+  gather(key='variable',value='distance',ends_with('dist')) %>%
+  filter(!is.na(distance))
+
+ppi %>% head
+```
+
+Before plotting, let's add information about insect-plant interactions
+```{r}
+ecology = data.frame(species = spp,
+                     interaction= c(rep('Brood pollinator',3),
+                                    rep('Dead tissue breeder', 6),
+                                    rep('Live tissue breeder', 2),
+                                    'Dead tissue breeder',
+                                    'Live tissue breeder'
+                                    ))
+
+ppi = ppi %>% 
+  left_join(ecology)
+
+ppi %>% head
+```
+
+Before plotting, let's order factors so that plot panels are in the order we want.
+```{r}
+ppi = ppi %>%
+  mutate(variable = factor(variable,
+                           ordered=T,
+                           levels=c('geo_dist','plant_dist'))) %>%
+  mutate(interaction = factor(interaction,
+                              ordered=T,
+                              levels=c('Brood pollinator', 
+                                       'Live tissue breeder',
+                                       'Dead tissue breeder'))) %>%
+  mutate(species = factor(species,
+                          ordered = T,
+                          levels = c(
+                     'Anchylorhynchus_1'  ,
+                     'Anchylorhynchus_2'  ,
+                     'Anchylorhynchus_3'  ,
+                     'M_bondari_1'        ,
+                     'M_bondari_2'        ,
+                     'M_ypsilon'          ,
+                     'R_rectinasus_1'     ,
+                     'Andranthobius_1'    ,
+                     'Andranthobius_2'    ,
+                     'C_decolor_1'        ,
+                     'C_decolor_2'        ,
+                     'C_impar'            ,
+                     'D_polyphaga'        ,
+                     'P_cocoseae'         
+                     ), 
+                     labels = c(
+                     "italic(Anc.~trapezicollis)~OTU~1" ,
+                     "italic(Anc.~trapezicollis)~OTU~2" ,
+                     "italic(Anc.~trapezicollis)~OTU~3" ,
+                     "italic(M.~bondari)~OTU~1"         ,
+                     "italic(M.~bondari)~OTU~2"         ,
+                     "italic(M.~ypsilon)"               ,
+                     "italic(R.~rectinasus)"            ,
+                     "italic(And.~bondari)~OTU~1"       ,
+                     "italic(And.~bondari)~OTU~2"       ,
+                     "italic(C.~decolor)~OTU~1"         ,
+                     "italic(C.~decolor)~OTU~2"         ,
+                     "italic(C.~impar)"                 ,
+                     "italic(D.~polyphaga)"             ,
+                     "italic(P.~cocoseae)"              
+                     )
+                     )
+  )
+```
+
+
+Now that we have the data in the format we need, let's plot.
+```{r}
+var_labels = c('geo_dist' = 'Geography (km)',
+               'plant_dist' = 'Plant genetic distance')
+
+
+p = ggplot(ppi) +
+  geom_point(aes(x=distance, y=pi, color=interaction),size=0.5) +
+  #scale_color_manual(values = c('Brood pollinator' = '#47DD8E',
+  #                     'Live tissue breeder' = '#DD4756',
+  #                     'Dead tissue breeder' = '#DD9C47'), name='Interaction') +
+  scale_color_brewer(type='qual', name = 'Interaction') +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 4)) +
+  facet_grid(species~variable,
+             margins=F,
+             scales = 'free',
+             labeller = labeller(variable=var_labels, 
+                                 species=label_parsed),
+             switch='x') +
+  xlab('Distance') +
+  ylab(expression(Pairwise~pi)) +
+  theme_few() +
+  theme(strip.text.y = element_text(angle = 0), 
+        strip.placement = "outside",
+        legend.position = 'bottom',
+        text = element_text(size=6),
+        panel.spacing.y = unit(0.1, "lines"),
+        panel.spacing.x = unit(0.1, "lines"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(-13,-12,-11,-12)) 
+
+print(p)
+
+ggsave(filename = './figures/gen_cov.pdf',
+       plot = p, 
+       device = 'pdf',
+       width = 11.4, 
+       height=12,
+       units = 'cm')
+  
+```
+
+To complete the plot, we will now add the average marginal effect of each distance as inferred by BEDASSLE. 
+
+The first step is to tabulate estimated parameters for each species.
+
+```{r}
+get_average_estimates = function(species){
+  
+  load(str_c('bedassle_results/',species,'_model.fit.Robj'))
+  load(str_c('bedassle_results/',species,'_data.block.Robj'))
+  
+  
+  
+  estimates = summary(model.fit, 
+                      pars=intersect(c('gamma',
+                                       'alpha0',
+                                       'alphaE[1]',
+                                       'alphaE[2]',
+                                       'alphaD',
+                                       'alpha2'),
+                                     names(model.fit))) %>%
+    .[['summary']] %>%
+    as.data.frame() %>%
+    rownames_to_column('parameter') %>%
+    dplyr::select(parameter,mean)
+
+  translation = c('gamma' = 'gamma',
+                  'alpha2'='alpha_2',
+                  'alphaD'='alpha_g',
+                  'alpha0'='alpha_0')
+  if ('alphaD' %in% estimates$parameter) {
+    norms = list('norm_g' = data.block$sd.geoDist)
+  } else {
+    norms = list()
+  }
+  
+  
+  if (best_models$plant[best_models$species == species] &
+      best_models$clim[best_models$species == species]){
+    translation = c(translation,
+                    c('alphaE[1]' = 'alpha_p',
+                      'alphaE[2]' = 'alpha_c'))
+    norms['norm_p'] = data.block$sd.envDist[1]
+    norms['norm_c'] = data.block$sd.envDist[2]
+    
+  } else if (best_models$plant[best_models$species == species]) {
+    translation = c(translation,
+                    c('alphaE[1]' = 'alpha_p'))
+    
+    norms['norm_p'] = data.block$sd.envDist
+    
+  } else if (best_models$clim[best_models$species == species]) {
+    translation = c(translation,
+                    c('alphaE[1]' = 'alpha_c'))
+    
+    norms['norm_c'] = data.block$sd.envDist
+  }
+  
+  estimates = estimates %>%
+           mutate(parameter = translation[parameter]) %>%
+    bind_rows(as.data.frame(norms) %>%
+                gather(key = 'parameter',
+                       value = 'mean'))
+  
+  return(estimates)
+  
+  
+}
+
+bedassle_averages = purrr::map_df(spp,get_average_estimates,.id = 'species') %>%
+  mutate(parameter = factor(parameter,
+                            levels=c("alpha_0",
+                                     "alpha_2",
+                                     "alpha_g",
+                                     "alpha_p",
+                                     "alpha_c",
+                                     "norm_g",
+                                     "norm_p",
+                                     "norm_c" )
+                            )) %>%
+  complete(species,parameter, fill=list(mean = 0))
+
+bedassle_averages 
+```
+
+Let's reshape it to have parameters as columns.
+
+```{r}
+bedassle_averages = bedassle_averages %>%
+  spread(parameter,mean)
+
+bedassle_averages
+```
+
+Now let's calculate the expected covariance decay for each species and distance. We will use the same formula that bedassle uses internally.
+
+$$
+Cov=\alpha_0*exp(-(\alpha_d*D)^{\alpha_2})
+$$
+
+After obtaining genetic covariance, we will calculate pairwise $\pi$. For that, we will use the reverse function that bedassle uses internally:
+```{r}
+bedassle::pwp2allelicCov
+```
+
+The reverse, therefore, is:
+$$
+  \pi=\frac{1}{2}-2*Cov
+$$
+
+```{r}
+geo_df = split(bedassle_averages, bedassle_averages$species) %>%
+  purrr::map_df(~data.frame(
+    distance = seq(0,1,length.out = 100) * max(geo_dist), 
+    covariance = .x$alpha_0 * exp(
+    -(seq(0,1,length.out = 100) / .x$norm_g * .x$alpha_g)^.x$alpha_2)
+    ),
+    .id = 'species') %>%
+  mutate(variable = 'geo_dist',
+         pi = 1/2 - 2*covariance)
+
+plant_df = split(bedassle_averages, bedassle_averages$species) %>%
+  purrr::map_df(~data.frame(
+    distance = seq(0,1,length.out = 100) * max(plant_dist), 
+    covariance= .x$alpha_0 * exp(
+    -(seq(0,1,length.out = 100) / .x$norm_p * .x$alpha_p)^.x$alpha_2)
+    ),
+    .id = 'species') %>%
+  mutate(variable = 'plant_dist',
+         pi = 1/2 - 2*covariance)
+
+# clim_df = split(bedassle_averages, bedassle_averages$species) %>%
+#   purrr::map_df(~data.frame(
+#     distance = seq(0,1,length.out = 100) * max(clim_dist), 
+#     covariance= .x$alpha_0 * exp(
+#     -(seq(0,1,length.out = 100) / .x$norm_c * .x$alpha_c)^.x$alpha_2)
+#     ),
+#     .id = 'species') %>%
+#   mutate(variable = 'clim_dist',
+#          pi = 1/2 - 2*covariance)
+    
+    
+
+curves_df = bind_rows(geo_df, plant_df) %>%
+  left_join(ecology) %>%
+  mutate(variable = factor(variable,
+                           ordered=T,
+                           levels=c('geo_dist','plant_dist'))) %>%
+  mutate(interaction = factor(interaction,
+                              ordered=T,
+                              levels=c('Brood pollinator', 
+                                       'Live tissue breeder',
+                                       'Dead tissue breeder'))) %>%
+  mutate(species = factor(species,
+                          ordered = T,
+                          levels = c(
+                     'Anchylorhynchus_1'  ,
+                     'Anchylorhynchus_2'  ,
+                     'Anchylorhynchus_3'  ,
+                     'M_bondari_1'        ,
+                     'M_bondari_2'        ,
+                     'M_ypsilon'          ,
+                     'R_rectinasus_1'     ,
+                     'Andranthobius_1'    ,
+                     'Andranthobius_2'    ,
+                     'C_decolor_1'        ,
+                     'C_decolor_2'        ,
+                     'C_impar'            ,
+                     'D_polyphaga'        ,
+                     'P_cocoseae'         
+                     ), 
+                     labels = c(
+                     "italic(Anc.~trapezicollis)~OTU~1" ,
+                     "italic(Anc.~trapezicollis)~OTU~2" ,
+                     "italic(Anc.~trapezicollis)~OTU~3" ,
+                     "italic(M.~bondari)~OTU~1"         ,
+                     "italic(M.~bondari)~OTU~2"         ,
+                     "italic(M.~ypsilon)"               ,
+                     "italic(R.~rectinasus)"            ,
+                     "italic(And.~bondari)~OTU~1"       ,
+                     "italic(And.~bondari)~OTU~2"       ,
+                     "italic(C.~decolor)~OTU~1"         ,
+                     "italic(C.~decolor)~OTU~2"         ,
+                     "italic(C.~impar)"                 ,
+                     "italic(D.~polyphaga)"             ,
+                     "italic(P.~cocoseae)"              
+                     )
+                     )
+  )
+  
+ggplot(curves_df) +
+  geom_line(aes(x=distance,y=pi)) +
+  facet_grid(species~variable, scales = 'free')
+
+```
+
+
+Finally, let's plot the curves together with points:
+
+```{r}
+p = ggplot(ppi) +
+  geom_point(aes(x=distance, y=pi, color=interaction),size=0.5) +
+  #scale_color_manual(values = c('Brood pollinator' = '#47DD8E',
+  #                     'Live tissue breeder' = '#DD4756',
+  #                     'Dead tissue breeder' = '#DD9C47'), name='Interaction') +
+  geom_line(data = curves_df,
+            aes(x=distance,y=pi),size=0.2,linetype='dashed') +
+  scale_color_brewer(type='qual', name = 'Interaction') +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 3),
+                     labels = function(x) sprintf("%.2f", x)) +
+  facet_grid(species~variable,
+             margins=F,
+             scales = 'free',
+             labeller = labeller(variable=var_labels, 
+                                 species=label_parsed),
+             switch='x') +
+  xlab('Distance') +
+  ylab(expression(Pairwise~pi)) +
+  theme_few() +
+  theme(strip.text.y = element_text(angle = 0,hjust = 0), 
+        strip.placement = "outside",
+        legend.position = 'bottom',
+        text = element_text(size=6),
+        panel.spacing.y = unit(0.1, "lines"),
+        panel.spacing.x = unit(0.1, "lines"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(-13,-12,-11,-12)) 
+
+print(p)
+
+ggsave(filename = './figures/gen_cov.pdf',
+       plot = p, 
+       device = 'pdf',
+       width = 11.4, 
+       height=12,
+       units = 'cm')
+```
+
+Let's also try making a more horizontal figure to fit the page better. For that, we will split the figure in two and plot side by side with `cowplot``
+```{r}
+
+clrs = RColorBrewer::brewer.pal(3,'Accent')
+names(clrs) = c('Brood pollinator', 'Live tissue breeder', 'Dead tissue breeder')
+
+var_labels = c('clim_dist' = 'Precipitation\n(mm)',
+                             'geo_dist' = 'Geography\n(km)',
+                             'plant_dist' = 'Plant genetic\ndistance (%)')
+
+ppi1 = ppi %>% 
+  filter(interaction %in% c('Brood pollinator', 'Live tissue breeder')) 
+
+curves1 = curves_df %>%
+  filter(species %in% unique(ppi1$species))
+
+p1 = ggplot(ppi1) +
+  geom_point(aes(x=distance, y=pi, color=interaction),size=0.5) +
+  geom_line(data = curves1,
+            aes(x=distance,y=pi),
+            size=0.2,
+            linetype='dashed') +
+  scale_color_manual(values = clrs, 
+                     name = 'Interaction', 
+                     drop = FALSE,
+                     guide = guide_legend(keywidth = unit(0.1,"line"))) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 3),
+                     labels = function(x) sprintf("%.2f", x)) +
+  facet_grid(species~variable,
+             margins=F,
+             scales = 'free',
+             labeller = labeller(variable=var_labels, 
+                                 species=label_parsed),
+             switch='x') +
+  xlab(NULL) +
+  ylab(expression(Pairwise~pi)) +
+  theme_few() +
+  theme(strip.text.y = element_text(angle = 0,hjust = 0), 
+        strip.placement = "outside",
+        legend.position = 'bottom',
+        legend.justification = 0,
+        text = element_text(size=7),
+        axis.text.x = element_text(hjust = 1,angle = 45),
+        axis.text.y = element_text(size=6),
+        panel.spacing.y = unit(0.1, "lines"),
+        panel.spacing.x = unit(0.1, "lines"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(-15.5,0,0,30)) 
+
+print(p1)
+
+
+ppi2 = ppi %>% 
+  filter(interaction == 'Dead tissue breeder') %>%
+  mutate(species = fct_drop(species))
+
+curves2 = curves_df %>%
+  filter(species %in% levels(ppi2$species))
+
+p2 = ggplot(ppi2) +
+  geom_point(aes(x=distance, y=pi, color=interaction),size=0.5) +
+  geom_line(data = curves2,
+            aes(x=distance,y=pi),
+            size=0.2,
+            linetype='dashed') +
+  scale_color_manual(values = clrs, name = 'Interaction', guide = 'none') +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 3),
+                     labels = function(x) sprintf("%.2f", x)) +
+  facet_grid(species~variable,
+             margins=F,
+             scales = 'free',
+             labeller = labeller(variable=var_labels, 
+                                 species=label_parsed),
+             switch='x') +
+  xlab(NULL) +
+  ylab(NULL) +
+  theme_few() +
+  theme(strip.text.y = element_text(angle = 0,hjust = 0), 
+        strip.placement = "outside",
+        legend.position = 'bottom',
+        text = element_text(size=7),
+        axis.text.x = element_text(hjust = 1,angle = 45),
+        strip.text.x = element_blank(),
+        axis.text.y = element_text(size=6),
+        panel.spacing.y = unit(0.1, "lines"),
+        panel.spacing.x = unit(0.1, "lines"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(-13,-12,-11,-12)) 
+
+print(p2)
+
+p = cowplot::plot_grid(p1,p2,ncol = 2)
+
+
+ggsave(filename = './figures/gen_cov_split.pdf',
+       plot = p, 
+       device = 'pdf',
+       width = 18, 
+       height=10,
+       units = 'cm')
+
+```
+
+
+

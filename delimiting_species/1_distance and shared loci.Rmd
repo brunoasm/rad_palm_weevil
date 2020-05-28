@@ -1,0 +1,492 @@
+---
+title: "Separating OTUs based on pairwise genetic distance and patterns of missing data."
+author: "Bruno de Medeiros"
+date: "7/13/2018"
+output: 
+  html_notebook:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+The first thing we noticed from our data is that within some species we clearly observe groups of specimens that share most loci among themselves and few loci with other groups. This could be an artifact of library preparation method, or a real phenomenon caused by deep genetic structure associated with indels or mutations at restriction sites.
+
+In the latter case, we expect that the number of loci shared between samples is highly correlated with genetic distance in the part of the genome that can be sequenced for both specimens. If that is the case, we can first cluster specimens based on genetic distance alone and separate their datasets. Since we cannot assemble a proper dataset for all samples given this pattern of missing data, here we will work with pairwise statistics only.
+
+The data used here was already filtered for samples yielding too few loci, since these might contain other artifacts as described by de Medeiros & Farrell (2018).
+
+## Loading packages
+
+We will not load plyr since it messes up with some dplyr functions. Instead, we will use `plyr::` when needed
+
+```{r warning=F, message=F}
+rm(list=ls())
+library(adegenet)
+library(phangorn)
+library(tidyverse)
+library(broom)
+library(foreach)
+library(doParallel)
+library(ggthemes)
+library(ggdendro)
+library(dendextend)
+library(mmod)
+library(ecodist)
+library(grid)
+library(gridExtra)
+```
+
+## Is the number of shared loci correlated with genetic distance?
+
+For each morphospecies, we will calculate all pairwise genetic distances and the number of loci shared. We have previously converted ipyrad's unlinked SNPS format to genpop using a python script. 
+
+Let's read all of them in a list. We will do it in parallel, since files are large and each one takes some time. We will save this list to an external file so we can quickly load it if rerunning the script. To run this block again, just uncomment it entirely.
+
+```{r}
+morphospp = list.files('input_files/',pattern = '^f_.+gen',recursive = F,include.dirs = F) %>%
+  str_replace_all(pattern = '^f_|\\.gen',replacement = '')
+
+names(morphospp) = morphospp
+
+workers <- makeCluster(9)
+registerDoParallel(workers)
+
+gendata = morphospp %>%
+  plyr::llply(function(x){
+    adegenet::read.genepop(file = paste('input_files/f_',x,'.gen',sep=''),
+                           ncode = 3)
+  },
+  .parallel = TRUE) %>%
+  list2env
+
+registerDoSEQ()
+stopCluster(workers)
+
+save(gendata,file='temporary_data/genind.RData')
+```
+
+Now let's load the data before proceeding:
+
+```{r}
+load(file='temporary_data/genind.RData')
+```
+
+
+For each species, we will now make a dataframe containing pairwise genetic distances and the number of loci shared.
+We will start by defining a function that calculates the number of shared loci between two samples:
+```{r}
+shared_loci <- function(i_genind) {
+  
+  pairwise_names = i_genind@tab %>%
+    rownames %>%
+    sort %>%
+    combn(x = . ,m = 2) %>%
+    t %>%
+    (function(x){
+      x = as.data.frame(x)
+      names(x) = c('sample1','sample2')
+      x
+    })
+
+  df_loci = pairwise_names %>%
+    plyr::adply(.margins = 1,
+                .parallel = T,
+                .fun =function(pair,y=i_genind){
+                  sum(apply(!is.na(y[unlist(pair)]@tab),2,all))
+                  },
+                #.progress = 'text',
+                .paropts = list(.export = ls(),
+                                .packages = c('adegenet'))) %>%
+    dplyr::rename(number_loci = V1)
+  
+  return(df_loci)
+}
+```
+
+
+Now we use plyr to apply this function to all species in parallel:
+```{r}
+
+workers <- makeCluster(9)
+registerDoParallel(workers)
+
+loci_df = plyr::ldply(as.list(gendata),
+            shared_loci,
+            .parallel = F,
+            .progress = "text",
+            .paropts = list(.packages = c('dplyr','adegenet'))) %>%
+  rename(taxon = .id)
+
+registerDoSEQ()
+stopCluster(workers)
+
+save(loci_df,file = 'temporary_data/loci_df.RData')
+loci_df
+```
+
+After running it once, we can simply load the file:
+```{r}
+load('temporary_data/loci_df.RData')
+loci_df
+```
+
+To calculate genetic distances, we will use full sequences. 
+We used the *.alleles.loci output file from ipyrad to produce nexus files, one for each locus in each species. We will calculate all pairwise Hamming distances between alleles, ignoring indels and ambiguities, and average this distance over all alleles for a pair of samples.
+
+Let's define a function that does that in parallel for all samples in one species:
+```{r}
+sequence_distance = function(taxon){
+  message('Doing ',taxon)
+  nexus_files = list.files(path = paste('input_files/f_', taxon,'/' ,sep=''),
+                           pattern = '.+\\.nex')
+  plyr::ldply(.data = nexus_files,
+              .parallel = T,
+              .paropts = list(.packages = c('phangorn','tidyverse','broom')),
+              .fun = function(x){
+                read.phyDat(paste('input_files/f_', taxon,'/', x , sep=''),
+                            'nexus') %>% 
+                  dist.hamming(exclude='pairwise') %>%
+                  tidy(diag = F, upper=T) %>% #to be robust to order, we need to keep upper diagonal for now, will remove later
+                  mutate(sample1=gsub('_.+$','',item1),
+                         sample2=gsub('_.+$','',item2)) %>%
+                  group_by(sample1,sample2) %>%
+                  summarise(distance = mean(distance)) %>%
+                  ungroup %>%
+                  filter(sample1 != sample2) #since there are 2 alleles per sample, we have to remove distance to itself
+              }
+              ) %>%
+    group_by(sample1,sample2) %>%
+    summarise(distance = mean(distance)) %>%
+    ungroup #%>% 
+  # below is commented out because it is best to keep redundant rows for now
+  # they will be removed when we join this dataframe with locus presence dataframe
+    # spread(key=sample1,
+    #        value=distance) %>%
+    # select(-sample2) %>%
+    # as.matrix %>%
+    # (function(x){
+    #   rownames(x) = colnames(x)
+    #   return(x)
+    # }) %>%
+    # as.dist %>%
+    # tidy(diag = F, upper=F)
+}
+```
+
+
+Now let's use dplyr to run this over all species. It takes a little over one hour in my personal computer, so we will run, save, and comment it out for the future.
+```{r}
+workers <- makeCluster(9)
+registerDoParallel(workers)
+
+dist_df = plyr::ldply(morphospp,
+            sequence_distance,
+            .parallel = F,
+            .progress = "text",
+            .paropts = list(.packages = 'dplyr')) %>%
+  rename(taxon = .id)
+
+registerDoSEQ()
+stopCluster(workers)
+
+save(dist_df,file = 'temporary_data/dist_df.RData')
+
+```
+
+After running once, we can simply load the data:
+```{r}
+load('temporary_data/dist_df.RData')
+```
+
+Now let's join both data frames.
+
+We start with loci_df, since dist_df has redundant rows (i. e. same pair of sample1,sample2 but inverted positions). By using left_join, we will automatically remove these rows:
+
+```{r}
+plot_df = loci_df %>% left_join(dist_df)
+plot_df
+```
+
+Finally, let's add a column indicating whether samples were processed in the same batch (0) or not (1). We will use this to understand if the difference in number of loci could be some artifact such as a batch effect due to size selection and PCR in pools. Some samples were prepared multiple times and therefore are present in multiple batches. In these cases, considered as same batch if two samples shared any batch.
+
+Let's load batch data.
+
+```{r}
+batches = readr::read_csv('sample_info/RAD_batches.csv') 
+batches
+```
+
+And now define a function that returns whether two samples share a batch. This function is not vectorized, so we will need rowwise() to run!
+
+```{r}
+batch_share = function(x,y){
+  bat_x = batches %>%
+    filter(genomics == x) %>%
+    pull(batch)
+  
+  bat_y = batches %>%
+    filter(genomics == y) %>%
+    pull(batch)
+  
+  return(length(intersect(bat_x,bat_y)) >= 1)
+}
+```
+
+
+Let's apply the function now, adding a column to the data.frame
+
+```{r}
+plot_df = plot_df %>%
+  rowwise() %>%
+  mutate(same_batch = batch_share(sample1, sample2)) %>%
+  ungroup
+
+plot_df
+```
+
+Now let's plot all species. Yellow indicates pairs that were prepared in the same batch.
+
+```{r}
+name_translation = c('Anchylorhynchus' = 'Anc.\ntrapezicollis',
+                     'Andranthobius' = 'And. bondari',
+                     'C_decolor' = 'C. decolor',
+                     'C_impar' = 'C. impar',
+                     'Dialomia' = 'D. polyphaga',
+                     'M_bondari' = 'M. bondari',
+                     'M_ypsilon' = 'M. ypsilon',
+                     'P_cocoseae' = 'P. cocoseae',
+                     'R_rectinasus' = 'R. rectinasus')
+
+p = ggplot(plot_df) +
+  geom_point(aes(x=distance,y=number_loci/1000, color=same_batch),alpha=0.1) +
+  geom_vline(aes(xintercept=0.025),linetype='dashed',colour='gray80') +
+  scale_x_continuous(labels = scales::percent,
+                     limits = c(-0.005,0.07),expand=c(0,0),
+                     breaks = c(0,0.025,0.05)) +
+  scale_y_continuous(breaks=c(0,10,20)) +
+  scale_color_colorblind(guide='none') +
+  xlab('Average pairwise distance') +
+  ylab('Number of loci shared (thousands)') +
+  facet_wrap(~taxon,
+             labeller = as_labeller(function(x){name_translation[x]}),
+             strip.position = 'top') +
+  theme_tufte() +
+  theme(strip.text = element_text(face = "italic"),
+        panel.border = element_rect(color='black',fill=NA))
+
+print(p)
+
+p1 =  p + 
+         facet_wrap(~taxon,
+             labeller = as_labeller(function(x){name_translation[x]}),
+             strip.position = 'right',
+             ncol=1) +
+         theme(strip.text = element_blank(),
+               axis.title.x=element_blank(),
+               axis.title.y=element_text(family='serif',size=10),
+               plot.margin = margin(r = 0, l=5,t=5,b=0))
+  
+  
+#To make figure 
+ggsave(filename = 'figures/seq_vs_loci_1.pdf',
+       device = 'pdf',
+       height = 200,
+       width = 168/2,
+       units = 'mm',
+       useDingbats=F,
+       plot = p1)
+```
+
+Let's now use a distance matrix regression to check for which species the relationship is signicant. We will also use same_batch as predictor to make sure this is not all a batch effect (except for R. rectinasus, since all were done in the same batch)
+
+```{r}
+regressions = plot_df %>%
+  mutate(distance = 100*distance) %>%
+  filter(taxon != 'R_rectinasus') %>%
+  group_by(taxon) %>%
+  do(mod=MRM(number_loci~distance+same_batch,data=.)) %>%
+  summarise(taxon=taxon,
+            coef_intercept=mod$coef['Int',1],
+            pvalue_intercept=mod$coef['Int',2],
+            coef_distance=mod$coef['distance',1],
+            pvalue_distance=mod$coef['distance',2],
+            coef_batch=mod$coef['same_batch',1],
+            pvalue_batch=mod$coef['same_batch',2],
+            r_sq=mod$r.squared['R2'],
+            F_test=mod$F.test['F'],
+            pvalue=mod$F.test['F.pval'])
+
+
+regressions = regressions %>% bind_rows(
+  plot_df %>%
+  mutate(distance = 100*distance) %>%
+  filter(taxon == 'R_rectinasus') %>%
+  group_by(taxon) %>%
+  do(mod=MRM(number_loci~distance,data=.)) %>%
+  summarise(taxon=taxon,
+            coef_intercept=mod$coef['Int',1],
+            pvalue_intercept=mod$coef['Int',2],
+            coef_distance=mod$coef['distance',1],
+            pvalue_distance=mod$coef['distance',2],
+            r_sq=mod$r.squared['R2'],
+            F_test=mod$F.test['F'],
+            pvalue=mod$F.test['F.pval'])
+)
+
+regressions %>%
+  mutate(coef_intercept = sprintf("%0.1f",coef_intercept/1000),
+         coef_distance = sprintf("%0.1f",coef_distance/1000),
+         coef_batch = sprintf("%0.1f",coef_batch/1000))
+
+
+```
+
+At high divergence levels (about more than 3%) we cannot even assemble a dataset with enough homologous loci across samples. In these cases, these diverged samples are certainly different species, not exchanging genes. For that reason, we will build separate datasets for each high-divergence cluster. 
+We will do hierarchical clustering using the "complete" method based on average pairwise sequence distance. The complete method uses as distance between clusters the maximal distance between its components. Then we will split the dataset between clusters separated by more than 3% differences.
+
+We will then try to assemble a dataset and see now we have overlapping genes. Let's visualize clusters:
+
+```{r}
+
+dendro_df = plyr::ldply(morphospp,.fun = function(x){
+  filter(dist_df, taxon==x) %>%
+    select(-taxon) %>%
+    spread(key=sample2,
+           value=distance) %>%
+    column_to_rownames(var = 'sample1') %>%
+    as.dist %>%
+    hclust('average') %>%
+    dendro_data() %>%
+    segment() 
+  }) %>%
+  rename(taxon = .id)
+  
+p = ggplot(dendro_df) +
+  geom_segment(aes(x=x, y=y, xend=xend, yend=yend),size=0.3) +
+  geom_hline(aes(yintercept=0.025),linetype='dashed',colour='gray80') +
+  scale_y_continuous(labels = scales::percent,
+                     limits = c(-0.005,0.07),expand=c(0,0),
+                     breaks = c(0,0.025,0.05)) +
+  coord_flip() +
+  facet_wrap(~taxon,
+             scales = "free_y",
+             labeller = as_labeller(function(x){name_translation[x]})) +
+  ylab('Average pairwise sequence distance') +
+  theme_tufte() +
+  theme(axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank(),
+        strip.text = element_text(face='italic'),
+        panel.border = element_rect(color='black',fill=NA))
+
+print(p)
+
+p2 = p + 
+  facet_wrap(~taxon,
+             labeller = as_labeller(function(x){name_translation[x]}),
+             scales = "free_y",
+             strip.position = 'left',
+             ncol=1) +
+  theme(axis.title = element_blank(),
+        strip.text.y = element_text(angle=180),
+        plot.margin = margin(l = 0, r=5, t=5,b=0))
+
+#To make figure 
+ggsave(filename = 'figures/seq_vs_loci_2.pdf',
+       device = 'pdf',
+       height = 200, 
+       width = 168/2,
+       units = 'mm',
+       useDingbats=F,
+       plot = p2)
+
+```
+
+Now let's make a figure joining all for publication
+```{r}
+p = grid.arrange(p1,
+                 p2,
+                 textGrob('Average pairwise sequence distance',
+                          gp = gpar(fontsize = 10,fontfamily='serif')),
+             layout_matrix = cbind(c(rep(1,20),3) %>% rep(5) %>% matrix(ncol = 5),
+                                   c(rep(2,20),3) %>% rep(6) %>% matrix(ncol = 6)
+                                   )
+             )
+
+ggsave(filename = 'figures/seq_vs_loci.pdf',
+       device = 'pdf',
+       height = 200, 
+       width = 168,
+       units = 'mm',
+       useDingbats=F,
+       plot = p)
+```
+
+Now, let's cut the dendrograms at 0.025. We will save this table to use later to map occurence of these groups, and to make new datasets for each group in ipyrad. It seems
+```{r}
+dendro_groups = plyr::ldply(morphospp,.fun = function(x){
+  filter(dist_df, taxon==x) %>%
+    select(-taxon) %>%
+    spread(key=sample2,
+           value=distance) %>%
+    column_to_rownames(var = 'sample1') %>%
+    as.dist %>%
+    hclust('complete') %>%
+    as.dendrogram %>%
+    dendextend::cutree(h=0.025,try_cutree_hclust=F) %>%
+    tibble(sample = names(.),
+           group = .)
+}) %>%
+  rename(taxon = .id) %>%
+  arrange(taxon,group,sample)
+
+dendro_groups
+
+readr::write_csv(dendro_groups,path = 'results/seqdist_clustering.csv')
+```
+We will also save this table to help creating new ipyrad files:
+```{r}
+dendro_groups %>%
+  group_by(taxon,group) %>%
+  summarise_all(.funs = function(x){paste(x,collapse=' ')}) %>%
+  readr::write_csv(path = 'results/seqdist_clustering_ipyrad.csv')
+```
+
+Finally, let's calculate G~ST~ between clusters found
+
+```{r}
+new_gendata = list(Anchylorhynchus=gendata$Anchylorhynchus,
+                   Andranthobius=gendata$Andranthobius,
+                   C_decolor=gendata$C_decolor,
+                   M_bondari=gendata$M_bondari)
+
+samp2pop = dendro_groups$group
+names(samp2pop) = dendro_groups$sample
+
+for (taxon in names(new_gendata)){
+  new_gendata[[taxon]]@pop = factor(samp2pop[new_gendata[[taxon]]@tab %>% rownames])
+}
+
+# workers <- makeCluster(2)
+# registerDoParallel(workers)
+#gsts = plyr::llply(new_gendata,
+#             pairwise_Gst_Hedrick,
+#             .parallel = T,
+#             .paropts = list(.packages='mmod'))
+# registerDoSEQ()
+# stopCluster(workers)
+
+
+#save(gsts,file = 'temporary_data/gst.RData')
+load('temporary_data/gst.RData')
+gsts
+
+```
+
+All G~ST~ values are very high
+
+For the next step, we will assemble new ipyrad datasets for each cluster, and we will treat these clusters as species.

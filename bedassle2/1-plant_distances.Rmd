@@ -1,0 +1,105 @@
+---
+title: "Plant distances"
+output: html_notebook
+---
+
+# Introduction
+In this notebook we will calculate genetic distances between plant populations to use as covariates in the BEDASSLE model. To make sure we have valid distances (i. e., [Euclidean](dx.doi.org/10.1111/2041-210X.12167)), we will use the average nucleotide distance as our metric.
+
+Let's start by reading packages:
+
+```{r warning=FALSE}
+library(tidyverse)
+library(broom)
+rm(list=ls())
+```
+
+# Reading distances
+
+Prior to this, we used [ANGSD](https://github.com/ANGSD/angsd) and [pcANGSD](https://github.com/Rosemeis/pcangsd) to calculate genotype probabilities for samples of **Syagrus** while considering genetic covariance between samples. We then used [NGSdist](https://github.com/fgvieira/ngsDist) to estimate pairwise nucleotide distances based on these genotype probabilities.
+
+Let's read the output file with these distances and prepare a data.frame with the data.
+
+```{r}
+dists = readr::read_delim('../ANGSD_plants/coronata_and_botryophora/syagrus_dists.txt',delim = '\t',  skip=2,col_names = FALSE)
+
+samples = dists[[1]] %>% 
+  stringr::str_extract('BdM[:alnum:]+')
+
+dists = as.matrix(dists[-1])
+rownames(dists) = colnames(dists) = samples
+
+dists = as.dist(dists) %>%
+  broom::tidy(upper=T, diag=F) %>%
+  rename(sample1 = item1,
+         sample2 = item2)
+
+dists 
+```
+
+These distances are between samples, and we want between populations, so we need to add data about populations and get average distances between populations. Let's read a data table, merge with distance data.frame and summarize.
+
+Read sample data and select important columns
+```{r}
+plant_data = readr::read_csv('plant_data.csv') %>%
+  select(sample = genomics,
+         population = pop_id_thesis) 
+
+plant_data
+```
+
+Replace samples by populations. To make it easier, we will transform the population data into a named vector and use `mutate` to do this replacement
+
+```{r}
+pops = plant_data$population
+names(pops) = plant_data$sample
+
+dists = dists %>%
+  mutate(pop1 = pops[as.character(sample1)],
+         pop2 = pops[as.character(sample2)])
+
+dists
+```
+
+Now we can remove lines corresponding to within-population comparisons (which will all be set to 0) and average distances between populations.
+
+```{r}
+pop_dists = dists %>%
+  filter(pop1 != pop2) %>%
+  group_by(pop1,pop2) %>%
+  summarise(distance = mean(distance)) %>%
+  spread(key=pop2,value=distance)
+
+pop_dists
+```
+
+Finally, let's reformat this in a distance matrix.
+```{r}
+pop_dists = as.matrix(pop_dists[-1])
+rownames(pop_dists) = colnames(pop_dists)
+diag(pop_dists) = 0
+```
+
+Population distances are Euclidean, so no problem for BEDASSLE:
+
+```{r}
+ade4::is.euclid(as.dist(pop_dists),plot=T)
+```
+
+
+Let's plot a dendogram based on these distances to get an idea of which populations are close to each other.
+
+```{r}
+plot(hclust(as.dist(pop_dists)))
+```
+
+
+
+
+We will use these corrected distances as our plant distances. Let's save them to use later.
+
+
+```{r}
+plant_dist = pop_dists
+save(plant_dist,file = 'plant_distances.Rdata') 
+```

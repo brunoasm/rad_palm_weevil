@@ -1,0 +1,25 @@
+// Priors and rules file
+// *********************
+
+[PARAMETERS]
+//#isInt? #name   #dist.#min  #max 
+//all Ns are in number of haploid individuals
+1  NPOPA       logunif     1e6  1e9   output
+1  NPOPB       logunif     1e6  1e9   output
+1  NPOPC       logunif     1e6  1e9   output
+0  MIGAB       logunif     1e-10  1e-2   output
+0  MIGBA       logunif     1e-10  1e-2      output
+0  MIGAC       logunif     1e-10  1e-2      output
+0  MIGCA       logunif     1e-10  1e-2      output
+0  MIGCB       logunif     1e-10  1e-2      output
+0  MIGBC       logunif     1e-10  1e-2      output
+1  T1          logunif     1e3   1e8       output
+1  T2          logunif     1e3   1e8       output
+0  SIZE1       logunif        0.1   10        output
+0  SIZE2       logunif        0.1   10        output
+
+
+[RULES]
+
+[COMPLEX PARAMETERS]
+

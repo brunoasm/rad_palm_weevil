@@ -1,0 +1,165 @@
+---
+title: "Cross validation results"
+output: html_notebook
+---
+
+We parallelized cross validation for all species. Now we will collect the results to infer the best model for each species.
+
+Let's start by loading packages
+```{r}
+library(tidyverse)
+```
+
+
+Let's do it for **Anchylorhynchus** OTU 2 first as an example:
+
+We start by making a list of all files with information.
+```{r}
+species = 'Anchylorhynchus_2'
+xval_files = Sys.glob(str_c('xval_results/',species,'*xval_results.txt'))
+```
+
+Now let's name that list with the model represented in each file.
+```{r}
+names(xval_files) = str_split(xval_files,'_') %>%
+  purrr::map(4) %>%
+  unlist
+
+xval_files
+```
+
+Now let's load all files as a list of tables:
+```{r}
+xval_results = purrr::map(xval_files,
+           ~readr::read_delim(.x,delim = ' '))
+```
+
+Now we will get the average predictive accuracy across partitions for each replicate and reshape the data.frame for plotting
+
+```{r}
+xval_summary = purrr::map_df(xval_results,
+           ~summarise_all(.x, mean),
+            .id = 'model') %>%
+  gather(key='replication',value='pred_value',starts_with('rep')) %>%
+  mutate(model = factor(model,levels = c('null','g','p','c','gp','gc','pc','full'),ordered = T))
+xval_summary
+```
+
+Now, let's plot the results for each model, as well as bars with standard error. The optimal model would be the simplest model among those with highest predictive value:
+
+```{r}
+ggplot(xval_summary, aes(x = model, y = pred_value)) +
+  geom_jitter() +
+  stat_summary(color='red',geom = 'errorbar') +
+  ggtitle(species)
+```
+
+Let's produce a table with confidence intervals for the predictive value of each model. In this case, it seems that geography only is the best model:
+
+```{r}
+xval_summary %>%
+  group_by(model) %>%
+  summarise(pred_mean = mean(pred_value),
+            pred_min = sprintf(pred_mean - sd(pred_value)/sqrt(n()),fmt = '%.2f'),
+            pred_max = sprintf(pred_mean + sd(pred_value)/sqrt(n()), fmt= '%.2f') ) %>%
+  arrange(-pred_mean) %>%
+  mutate(pred_mean = sprintf(pred_mean, fmt= '%.2f'),
+         `predictive_value`=str_c(pred_mean,' (',pred_min,'--',pred_max,')')) %>%
+  select(model, `predictive_value`)
+```
+
+Now that we did it for one species, let's enclose everything in a function and run for all species.
+
+```{r}
+summarize_xval = function(species){
+  xval_files = Sys.glob(str_c('xval_results/',species,'*xval_results.txt'))
+  
+  names(xval_files) = str_split(xval_files,'_') %>%
+    purrr::map(~.x[length(.x) - 2]) %>%
+    unlist
+  
+  xval_results = purrr::map(xval_files,
+                            ~readr::read_delim(.x,delim = ' '))
+  
+  xval_summary = purrr::map_df(xval_results,
+                               ~summarise_all(.x, mean),
+                               .id = 'model') %>%
+    gather(key='replication',value='pred_value',starts_with('rep')) %>%
+    mutate(model = factor(model,levels = c('null','g','p','c','gp','gc','pc','full'),ordered = T))
+  
+  print(ggplot(xval_summary, aes(x = model, y = pred_value)) +
+          geom_jitter() +
+          stat_summary(color='red',geom = 'errorbar') +
+          ggtitle(species))
+  
+  return(xval_summary %>%
+           group_by(model) %>%
+           summarise(pred_mean = mean(pred_value),
+                     pred_min = pred_mean - sd(pred_value)/sqrt(n()),
+                     pred_max = pred_mean + sd(pred_value)/sqrt(n()),
+                     pred_meanchar = sprintf(pred_mean, fmt= '%.2f'),
+                     pred_minchar = sprintf(pred_min, fmt = '%.2f'),
+                     pred_maxchar = sprintf(pred_max, fmt = '%.2f'),
+                     `predictive_value` = str_c(pred_meanchar,
+                                                '(',
+                                                pred_minchar,
+                                                '--',
+                                                pred_maxchar,
+                                                ')')) %>%
+           arrange(-pred_mean) %>%
+           mutate() %>%
+           select(model,`predictive_value`,pred_mean,pred_min,pred_max) %>%
+           mutate(species = species) %>%
+           mutate(ndist = ifelse(model == 'null',0,
+                                 ifelse(model == 'full',3,
+                                        str_length(model))))) 
+}
+```
+
+Let's place all species names in a vector
+```{r}
+spp = c(str_c('Anchylorhynchus_',1:3),
+        str_c('Andranthobius_',1:2),
+        str_c('C_decolor_',1:2),
+        'C_impar',
+        'D_polyphaga',
+        'M_bondari_1',
+        'M_ypsilon',
+        'P_cocoseae',
+        'R_rectinasus_1')
+spp
+```
+
+Now, let's retrieve cross validation results for all species:
+
+```{r message=FALSE}
+all_xval = purrr::map_df(spp,
+              summarize_xval)
+
+all_xval
+```
+
+For proceeding with BEDASSLE, we will choose, for each species, the model with the least parameters among those with equally high predictive power (i. e. overlapping intervals). If more than one model with same number of parameters, we will choose the one with highest average predictive power.
+
+
+```{r}
+best_model = all_xval %>%
+  group_by(species) %>%
+  arrange(species,-pred_mean) %>%
+  filter(as.numeric(pred_max) > pred_min[1]) %>%
+  arrange(species,ndist,-pred_mean) %>%
+  slice(1) %>%
+  select(species,model,predictive_value, everything())
+
+best_model
+```
+
+
+We will now run bedassle for each species separately, using the chosen model and full data to estimate parameters. Let's save the best model table to use it later to run bedassle:
+```{r}
+readr::write_csv(best_model, 'bedassle_results/best_models.csv')
+```
+
+
+
+

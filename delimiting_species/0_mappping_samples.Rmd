@@ -1,0 +1,267 @@
+---
+title: "Map samples"
+output: 
+  html_notebook:
+    df_print: paged
+---
+
+This script produces a map for all samples included in the study, including number of samples per species.
+
+# Load packages
+```{r warning=FALSE, message=FALSE}
+library(raster)
+library(rnaturalearth)
+library(sf)
+library(adegenet)
+library(tidyverse)
+library(ggthemes)
+library(RStoolbox)
+library(scales)
+library(broom)
+rm(list=ls())
+```
+
+
+
+# Load and prepare data
+
+Let's save the names of all species in a vector to facilitate loops.
+```{r}
+spp = list.dirs('./input_files/',recursive = F,full.names = F) %>%
+  str_extract('^f_.*') %>%
+  na.omit() %>%
+  str_replace('f_','')
+  
+names(spp) = spp
+
+spp
+```
+
+We will use the list of bam files used in ANGSD to get sample ids that were effectively included:
+```{r warning=FALSE, message=FALSE}
+insect_specimens = list.files(path = '../ANGSD_weevils/',
+                              pattern = '^bam.filelist',
+                              recursive = T,
+                              full.names = T) %>%
+  sapply(function(x){
+    readLines(x) %>%
+      basename() %>%
+      str_remove_all('\\..+$')
+  }) %>%
+  unlist %>%
+  unique
+
+str(insect_specimens)
+```
+
+Let's do the same with plants:
+```{r}
+plant_samples = list.files(file.path('../','ANGSD_plants','coronata_and_botryophora'), 
+                           pattern = 'bam.filelist',
+                           recursive = T,
+                           full.names = T) %>%
+  file %>%
+  readLines() %>%
+  basename() %>%
+  str_remove_all('\\..+$') %>%
+  unique
+
+str(plant_samples)
+```
+
+Now let's get a count of samples per population for insects. Insect species names in the data table  are based on morphology only and not always correspond to the names we will use here, so we will standardize to the names to be used.
+```{r}
+name_translation = c('Anchylorhynchus\ntrapezicollis',
+                            'Anchylorhynchus\ntrapezicollis',
+                            'Andranthobius\nbondari',
+                            'Andranthobius\nbondari',
+                            'Celetes\ndecolor',
+                            'Celetes\nimpar',
+                            'Dialomia\npolyphaga',
+                            'Microstrates\nbondari',
+                            'Microstrates\nypsilon',
+                            'Phytotribus\ncocoseae',
+                            'Remertus\nrectinasus',
+                            'Remertus\nrectinasus')
+
+names(name_translation) = c('Anchylorhynchus botryophorae', 
+                     'Anchylorhynchus trapezicollis', 
+                     'Andranthobius bondari', 
+                     'Andranthobius sp_1', 
+                     'Celetes decolor', 
+                     'Celetes impar', 
+                     'Dialomia sp_1', 
+                     'Microstrates bondari', 
+                     'Microstrates ypsilon', 
+                     'Phytotribus cocoseae', 
+                     'Remertus sp_1', 
+                     'Remertus sp_2')
+```
+
+We want to map the number of samples per locality, so first we will generate a table with these counts.
+```{r}
+insect_df = readr::read_csv('sample_info/sample_data.csv') %>% 
+  filter(genomics_id %in% insect_specimens) %>% #there are some duplicates, let's remove them
+  rowwise() %>%
+  mutate(taxon=paste(higher_taxon, species)) %>%
+  mutate(taxon=name_translation[taxon]) %>%
+  ungroup() %>%
+  dplyr::select(taxon,genomics_id,population=pop_id_thesis) %>%
+  distinct %>%
+  group_by(taxon, population) %>%
+  summarise(N = n())
+
+insect_df
+```
+
+And the same for plants:
+```{r}
+plant_df = readr::read_csv('sample_info/Syagrus_data.csv') %>% 
+  rename(sample = genomics,
+         population = pop_id_thesis) %>%
+  filter(sample %in% plant_samples) %>%
+  dplyr::select(plant_species,sample,lat,lon,population) %>%
+  distinct %>% 
+  group_by(plant_species, population) %>%
+  summarise(lat = mean(lat),
+          lon = mean(lon),
+          N = n()) %>%
+  ungroup %>%
+  mutate(plant_species = paste('S.',plant_species))
+
+plant_df
+  
+```
+
+Now let's put it all in the same data frame:
+```{r}
+all_df = plant_df %>% 
+  dplyr::select(-N) %>%
+  right_join(insect_df,by = 'population') %>%
+  bind_rows(plant_df %>% mutate(taxon = 'Syagrus'))
+
+all_df
+```
+
+# Plot map
+
+Now, let's download a base map from Natural Earth. 
+```{r}
+basemap = ne_download(scale = 'large', type = 'GRAY_HR_SR_OB_DR', category = 'raster', destdir = './map')
+```
+
+After map is downloaded, let's crop it to the region of interest:
+```{r}
+basemap = stack('map/GRAY_HR_SR_OB_DR/GRAY_HR_SR_OB_DR.tif')
+bbox = raster::extent(c(xmin=-48,xmax=-32,ymin=-25,ymax=-4))
+cropped = raster::crop(basemap,bbox)
+map_layer = RStoolbox::ggRGB(cropped, ggLayer = TRUE,r = 1,g=1,b=1)
+#the following is just to visualize the layer
+print(ggRGB(cropped, r = 1,g=1,b=1))
+```
+
+Now let's plot it all:
+```{r}
+p = ggplot(all_df) +
+  map_layer +
+  geom_point(aes(x = lon, 
+                 y = lat, 
+                 size = N,
+                 shape = plant_species,
+                 color = plant_species)
+  ) + 
+  scale_shape_manual(values = 21:23,
+                     guide = guide_legend(title = 'Plant species',
+                                          label.theme = element_text(face='italic',
+                                                                     size=8),
+                                          override.aes = list(size=4,
+                                                              color=c('#1b9e77',
+                                                                      '#d95f02',
+                                                                      '#7570b3')
+                                                              )
+                     )) +
+  scale_size_area(breaks=c(1,2,5,10),
+                        name = 'Number of\nsamples',
+                        guide = guide_legend(override.aes = list(shape=21,
+                                                                 fill=NA))) +
+  scale_color_manual(values = c('S. botryophora' = '#1b9e77',
+                                'S. x costae' = '#7570b3',
+                                'S. coronata' = '#d95f02'),
+                     guide='none') +
+  facet_wrap(~taxon,
+             ncol=4) +
+  theme_tufte() +
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        strip.text = element_text(face='italic')) +
+  coord_equal(xlim = c(-44,-35),
+              ylim = c(-8.5,-20))
+p
+
+ggsave(filename = 'figures/map_methods.pdf',
+       plot = p,
+       device = 'pdf',
+       width = 168,
+       height = 150,
+       units = 'mm',
+       useDingbats=F)
+```
+
+Let's now plot the map with an inset:
+
+```{r warning=FALSE}
+
+bbox = raster::extent(c(xmin=-44,
+              xmax=-35,
+              ymin=-20,
+              ymax=-8.5)) %>%
+  as('SpatialPolygons')
+
+crs(bbox) = crs(basemap)
+
+bbox = st_as_sf(bbox)
+  
+cropped_Brazil = raster::crop(basemap,raster::extent(c(xmin=-83,xmax=-33,ymin=-30,ymax=0)))
+
+map_extent_sf = raster::extent(c(xmin=-83,xmax=-33,ymin=-31,ymax=1)) %>%
+  as('SpatialPolygons') %>%
+  st_as_sf() %>%
+  st_set_crs(as.character(crs(cropped_Brazil)))
+  
+countries = ne_countries(scale=50, returnclass = 'sf') %>%
+  st_transform(as.character(crs(cropped_Brazil))) %>%
+  st_intersection(map_extent_sf)
+
+p = ggRGB(cropped_Brazil, r = 1,g=1,b=1) +
+  geom_sf(color='black',fill=NA, size=0.2, data=countries) +
+  #geom_sf(data=bbox,fill=NA) +
+  geom_sf(data=bbox,fill=NA,color='black') +
+  coord_sf() +
+  theme_few() +
+  xlab(NULL) +
+  ylab(NULL) +
+  scale_x_continuous(expand = c(0,0), 
+                     breaks=c(-80,-40),limits = c(-83,-33)) +
+  scale_y_continuous(expand = c(0,0), 
+                     breaks=c(0,-30),limits = c(-30,0)) +
+  theme(panel.grid = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        plot.margin = margin(t = 5.5,
+                             r = 5.5,
+                             b = 5.5,
+                             l = 10))
+
+
+
+ ggsave(filename = 'figures/map_methods_inset.pdf',
+        plot = p,
+        device = 'pdf',
+        width = 66.6667,
+        height = 50,
+        units = 'mm',
+        useDingbats=F,
+        bg="transparent")
+
+print(p)
+```

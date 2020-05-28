@@ -1,0 +1,194 @@
+---
+title: "Environmental distances"
+output: html_notebook
+---
+
+# Introduction
+Here we will use bioclimatic variables from worldclim to obtain a measure of climatic distance between localities where weevils were collected.
+
+Let's start by reading packages:
+
+```{r warning=FALSE}
+library(tidyverse)
+library(raster)
+library(sf)
+library(sp)
+library(rgbif)
+library(CoordinateCleaner)
+library(ggbiplot)
+rm(list = ls())
+```
+
+# Downloading data from WorldClim
+
+To start, we will download worldclim bioclimatic layers at 2.5 minute resolution from http://worldclim.org/version2.
+
+Then, we will crop layers to our region of interest to reduce file size. The code to do so is commented out below, in this notebook we will simply read the smaller file to save time.
+
+```{r}
+#bioclim = raster::stack(list.files('worldclim/wc2.0_2.5m_bio/',full.names = T))
+#bbox = raster::extent(c(xmin=-48,xmax=-32,ymin=-25,ymax=-4))
+#cropped = raster::crop(bioclim,bbox)
+#writeRaster(cropped,'./worldclim/wc2.0_2.5m_bio_cropped','GTiff')
+bioclim = raster::stack('worldclim/wc2.0_2.5m_bio_cropped.tif')
+```
+
+# Correlation between bioclimatic variables
+
+We will now download data for both **Syagrus coronata** and **Syagrus botryophora** from GBIF to understand how bioclimatic variables are correlted across the range of these species. Let's download records and clean with coordinate cleaner:
+
+```{r}
+gbif_data <- occ_search(scientificName = "Syagrus botryophora", limit = 5000,
+                  return = "data", hasCoordinate = T, country = 'BR') %>%
+  bind_rows(occ_search(scientificName = "Syagrus coronata", limit = 5000,
+                  return = "data", hasCoordinate = T, country = 'BR')) %>%
+  dplyr::select(species, decimalLongitude, decimalLatitude, countryCode) %>%
+  filter(!is.na(decimalLongitude)) %>%
+  filter(!is.na(decimalLatitude)) %>%
+  mutate(countryCode = countrycode::countrycode(countryCode, 
+                                                origin =  'iso2c', 
+                                                destination = 'iso3c')) %>%
+  clean_coordinates(lon = "decimalLongitude", 
+                    lat = "decimalLatitude",
+                          countries = "countryCode", 
+                          species = "species", 
+                    #outliers_method = 'distance',
+                    outliers_mtp = 1, 
+                    value = 'clean') %>%
+  filter(decimalLongitude>-50,
+         decimalLatitude>-20) #for some reason, this is still not cleaned
+
+wm <- borders("world", colour="gray50", fill="gray50")
+
+p = ggplot(gbif_data)+ 
+  coord_fixed(xlim = range(gbif_data$decimalLongitude),
+              ylim = range(gbif_data$decimalLatitude))+ 
+  wm +
+  geom_point(aes(x = decimalLongitude, y = decimalLatitude, color=species), size = 0.5) +
+  scale_color_discrete(labels = c(`Syagrus botryophora` = "S. botryophora",
+      `Syagrus coronata` = "S. coronata")) +
+  xlab('Latitude') +
+  ylab('Longitude') +
+  theme_bw() +
+  theme(legend.position = 'bottom',
+        text=element_text(size=10),
+        legend.text = element_text(face='italic')) 
+
+print(p)
+
+ggsave(filename = './figures/bioclim_map.pdf',
+       plot = p,
+       width = 17.8/2, 
+       height = 17.8*3/4,
+       units='cm',
+       useDingbats=F)
+
+
+
+```
+
+Now, let's extract bioclimatic variables for these points:
+
+```{r}
+bioclim_vars = gbif_data %>%
+  st_as_sf(coords = c('decimalLongitude', 'decimalLatitude'), crs = 4326) %>%
+  as('Spatial') %>%
+  raster::extract(x=bioclim) %>%
+  as_tibble %>%
+  rename_all(funs(str_extract(.,'[0-9]+$') %>% str_c('bio',.)))
+
+bioclim_vars
+```
+
+With this table, we can do a PCA to see which variables are correlated:
+
+```{r}
+bc_mat = bioclim_vars %>%
+  as.matrix
+
+PCA = prcomp(bc_mat)
+biplot(PCA,xlabs=rep('.',nrow(bc_mat)))
+PCA$sdev^2/sum(PCA$sdev^2)
+PCA$rotation[,1:2]
+
+p = ggbiplot(PCA, groups = gbif_data$species, scale = 1) +
+  scale_color_discrete(guide='none') +
+  theme(text = element_text(size=10))
+
+print(p)
+
+ggsave(filename = './figures/biplot.pdf',
+       plot = p,
+       width = 17.8/2, 
+       height = 17.8*3/4,
+       units='cm',
+       useDingbats=F)
+
+
+```
+
+Almost all of the variation in climate can be explained simply by BIO12: Annual Precipitation. Therefore, we will use only BIO12 to calculate environmental distances.
+
+# Calculation of climatic distances
+
+To extract bioclimatic variables, we will first load plant data to extract localities of collection:
+
+```{r message=FALSE, warning=FALSE}
+collection_points = readr::read_csv('plant_data.csv') %>%
+  dplyr::select(population = pop_id_thesis, lat, lon) %>%
+  distinct
+
+collection_points
+```
+
+Now let's use these localities to extract bioclimatic variables from the raster:
+
+```{r}
+bioclim_vars = collection_points %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 4326) %>%
+  as('Spatial') %>%
+  raster::extract(x=bioclim) %>%
+  as_tibble %>%
+  rename_all(funs(str_extract(.,'[0-9]+$') %>% str_c('bio',.))) %>%
+  bind_cols(collection_points) %>%
+  group_by(population) %>%
+  summarise_all(mean)
+
+bioclim_vars
+```
+
+Now let's pull BIO12 and calculate pairwise distances.
+
+```{r}
+clim_dist = dist(bioclim_vars$bio12) %>%
+  as.matrix()
+rownames(clim_dist) = colnames(clim_dist) = bioclim_vars$population
+
+clim_dist
+
+```
+
+
+Finally, let's calculate pairwise geographical distances from geographical coordinates. We will project them to UTM first to obtain Euclidean distances.
+```{r}
+mean_locs = collection_points %>%
+  group_by(population) %>%
+  summarise_all(mean) 
+
+geo_dist = mean_locs %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 4326) %>%
+  st_transform(st_crs(32724)) %>%
+  st_distance() %>%
+  units::set_units('km')
+
+colnames(geo_dist) = rownames(geo_dist) = mean_locs$population
+
+geo_dist
+```
+
+
+Finally, let's save the distance matrices to use later in BEDASSLE model
+```{r}
+save(geo_dist,clim_dist,file = 'worldclim/distances.Rdata') 
+```
+

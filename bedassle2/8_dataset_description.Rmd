@@ -1,0 +1,135 @@
+---
+title: "Dataset description"
+output: html_notebook
+---
+
+Now we will generate a table describing the dataset, with number of loci/sites included in each analysis.
+
+The number of pairwise high-coverage loci is already shown in supplementary Figure S2, so here we will focus on the datasets after splitting cryptic species.
+
+We will report in this table the total number of samples and of SNPs per species, as well as number of SNPs included in bedassle analyses.
+
+Let's start by getting statistics for plants. First, number of samples and populations.
+```{r}
+rm(list=ls())
+library(tidyverse)
+library(reticulate)
+np = import("numpy", convert=FALSE)
+
+plants = readLines('../ANGSD_plants/coronata_and_botryophora/bam.filelist') %>%
+      basename() %>%
+      str_remove_all('\\..+$')
+
+plant_data = read_csv('plant_data.csv') %>%
+  filter(genomics %in% plants) %>%
+  select(sample=genomics,
+         species=plant_species,
+         population=pop_id_thesis) %>%
+  group_by(species) %>%
+  summarise(N_samples = length(unique(sample)),
+            N_pops = length(unique(population)))
+
+plant_data
+```
+
+Now, number of SNPs
+```{r}
+#read_delim('angsd_plants/botryophora.pca.post.beagle',delim='\t')
+plant_data$SNPs = plant_data$species %>%
+  purrr::map(~length(scan(str_c('../ANGSD_plants/',.x,'/pca.post.beagle'),
+     what = 'character',
+     sep = '\n')) - 1) %>%
+  unlist
+
+plant_data
+```
+
+
+Now let's do the same for insects. We will first define a function and then apply it to all insect species
+
+```{r}
+get_stats = function(species){
+  gen_path = file.path('..','ANGSD_weevils','PCA',species,'*.pca.geno.npy') %>%
+    Sys.glob()
+  
+  genotypes = np$load(gen_path) %>% 
+    as.matrix() %>%
+    t()
+  
+  bamfile = file.path('..','ANGSD_weevils','PCA',species,'bam.filelist')
+  samples = readr::read_lines(bamfile) %>% basename() %>% str_remove('\\..+$')
+  
+  site_path = file.path('..','ANGSD_weevils','PCA',species,'*.pca.sites') %>% 
+    Sys.glob()
+  sites = readr::read_lines(site_path)
+  
+  colnames(genotypes) = samples
+  
+  genotypes = genotypes %>% 
+    as_tibble %>%
+    na_if(-9) %>%
+    mutate(site = sites)
+  
+  genotypes = genotypes %>%
+    gather(key=sample,value=genotype,-site)
+  
+  genotypes = sample_data %>% 
+    select(sample=genomics,population=pop_id_thesis) %>%
+    distinct() %>%
+    right_join(genotypes) %>%
+    mutate(locus = str_remove(site, '_.+$') %>% as.integer)
+  
+  counts = genotypes %>%
+    summarise(N_samples = length(unique(sample)),
+              N_pops = length(unique(population)),
+              N_loci = length(unique(locus)),
+              SNPs = length(unique(site)))
+  
+  return(counts)
+  
+}
+```
+
+Now let's apply the function to all species.
+
+```{r}
+
+sample_data = readr::read_csv('weevil_data.csv',guess_max = 1000)
+
+species = list.dirs('../ANGSD_weevils/PCA/',full.names = F,recursive = F)
+names(species) = species
+
+weevil_counts = purrr:::map_df(species,
+               get_stats,
+               .id = 'species')
+
+weevil_counts
+```
+
+Let's now load the input we used for BEDASSLE2 to count the number of unlinked SNPs.
+
+```{r}
+load('weevils_freq_data.Rdata')
+```
+
+```{r}
+weevil_counts = purrr::map_df(BEDASSLE_data,
+          ~ncol(.x$freqs)) %>%
+  do.call(rbind,.) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = 'species') %>%
+  rename(uSNPs=V1) %>%
+  right_join(weevil_counts)
+
+weevil_counts
+```
+
+Finally, let's join plants and insects and export a csv table.
+
+```{r}
+bind_rows(plant_data, weevil_counts)
+
+bind_rows(plant_data, weevil_counts) %>%
+  write_csv('tables/stats.csv')
+```
+

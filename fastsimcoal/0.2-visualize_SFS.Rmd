@@ -1,0 +1,269 @@
+---
+title: "Visualize SFS"
+author: "Bruno de Medeiros"
+date: "2/29/2020"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+.libPaths('~/vdiR/library/')
+library(tidyverse)
+```
+
+In this script, we will visualize the site frequency spectra that we will use to infer migration rates using fastsimcoal. 
+
+Let's start by reading the SFS files for Anchylorhynchus 1, the species on both S. coronata and S. botryophora.
+
+```{r}
+species = 'Anchylorhynchus_1'
+
+dimensions = scan(paste0(species,'/',species,'_MSFS.obs'),
+                  what='integer',
+                  sep=' ',
+                  skip = 1,
+                  nlines = 1) %>%
+  as.numeric
+
+dimensions = dimensions[-1]
+
+
+folded_counts = scan(paste0(species,'/',species,'_MSFS.obs'),
+                  what='integer',
+                  sep=' ',
+                  skip = 2,
+                  nlines = 1) %>%
+  as.numeric 
+
+
+if (length(dimensions) == 3){
+  df = expand.grid(freq_3 = 0:dimensions[3],
+                 freq_2 = 0:dimensions[2],
+                 freq_1 = 0:dimensions[1]) %>%
+  mutate(count = folded_counts) 
+} else {
+  df = expand.grid(freq_2 = 0:dimensions[2],
+                 freq_1 = 0:dimensions[1]) %>%
+  mutate(count = folded_counts)
+}
+
+
+df
+
+```
+
+Now we can use group_by to marginalize. Let's look at Population 1 vs population 2.
+
+```{r}
+df_temp = df %>%
+  group_by(freq_1,freq_2) %>%
+  summarize(count = sum(count)) %>%
+  mutate(new_freq_1 = ifelse(freq_1+freq_2>(sum(dimensions[1:2])/2),
+                             max(freq_1)-freq_1,
+                             freq_1),
+         new_freq_2 = ifelse(freq_1+freq_2>(sum(dimensions[1:2])/2),
+                             max(freq_2)-freq_2,
+                             freq_2)
+         ) %>%
+  group_by(new_freq_1, new_freq_2) %>%
+  summarise(count = sum(count)) %>%
+  rename(freq_1 = new_freq_1,
+         freq_2 = new_freq_2)
+
+
+
+ggplot(df_temp) +
+  geom_raster(aes(x = freq_1, y = freq_2, fill = count)) +
+  scale_fill_viridis_c(option = 'B', trans='log1p', breaks = 10^(1:6)) +
+  coord_cartesian(expand=F)
+```
+
+Now pop 1 vs pop 3:
+
+```{r}
+df_temp = df %>%
+  group_by(freq_1,freq_3) %>%
+  summarize(count = sum(count)) %>%
+  mutate(new_freq_1 = ifelse(freq_1+freq_3>(sum(dimensions[c(1,3)])/2),
+                             max(freq_1)-freq_1,
+                             freq_1),
+         new_freq_3 = ifelse(freq_1+freq_3>(sum(dimensions[c(1,3)])/2),
+                             max(freq_3)-freq_3,
+                             freq_3)
+         ) %>%
+  group_by(new_freq_1, new_freq_3) %>%
+  summarise(count = sum(count)) %>%
+  rename(freq_1 = new_freq_1,
+         freq_3 = new_freq_3)
+
+
+
+ggplot(df_temp) +
+  geom_raster(aes(x = freq_1, y = freq_3, fill = count)) +
+  scale_fill_viridis_c(option = 'B', trans='log1p', breaks = 10^(1:6)) +
+  coord_cartesian(expand=F)
+```
+
+Now pop 2 vs pop 3:
+```{r}
+df_temp = df %>%
+  group_by(freq_2,freq_3) %>%
+  mutate(new_freq_2 = ifelse(freq_2+freq_3>(sum(dimensions[c(2,3)])/2),
+                             max(freq_2)-freq_2,
+                             freq_2),
+         new_freq_3 = ifelse(freq_2+freq_3>(sum(dimensions[c(2,3)])/2),
+                             max(freq_3)-freq_3,
+                             freq_3)
+         ) %>%
+  group_by(new_freq_2, new_freq_3) %>%
+  summarise(count = sum(count)) %>%
+  rename(freq_2 = new_freq_2,
+         freq_3 = new_freq_3)
+
+ggplot(df_temp) +
+  geom_raster(aes(x = freq_2, y = freq_3, fill = count)) +
+  scale_fill_viridis_c(option = 'B', trans='log1p', breaks = 10^(1:6)) +
+  coord_cartesian(expand=F)
+```
+
+Now let's transform this in a function to visualize all species. 
+
+```{r}
+show_SFS = function(species){
+  
+  dimensions = scan(paste0(species,'/',species,'_MSFS.obs'),
+                  what='integer',
+                  sep=' ',
+                  skip = 1,
+                  nlines = 1) %>%
+  as.numeric
+
+dimensions = dimensions[-1]
+
+
+folded_counts = scan(paste0(species,'/',species,'_MSFS.obs'),
+                  what='integer',
+                  sep=' ',
+                  skip = 2,
+                  nlines = 1) %>%
+  as.numeric 
+
+
+if (length(dimensions) == 3){
+  df = expand.grid(freq_3 = 0:dimensions[3],
+                 freq_2 = 0:dimensions[2],
+                 freq_1 = 0:dimensions[1]) %>%
+  mutate(count = folded_counts) 
+  
+p1 = df %>%
+  mutate(new_freq_1 = ifelse(freq_1+freq_2>(sum(dimensions[1:2])/2),
+                             max(freq_1)-freq_1,
+                             freq_1),
+         new_freq_2 = ifelse(freq_1+freq_2>(sum(dimensions[1:2])/2),
+                             max(freq_2)-freq_2,
+                             freq_2)
+         ) %>%
+  group_by(new_freq_1, new_freq_2) %>%
+  summarise(count = sum(count)) %>%
+  rename(freq_1 = new_freq_1,
+         freq_2 = new_freq_2) %>%
+  ggplot() +
+  geom_raster(aes(x = freq_1, y = freq_2, fill = count)) +
+  scale_fill_viridis_c(option = 'B', trans='log1p', breaks = 10^(1:6)) +
+  coord_cartesian(expand=F)
+
+p2 = df %>%
+  mutate(new_freq_1 = ifelse(freq_1+freq_3>(sum(dimensions[c(1,3)])/2),
+                             max(freq_1)-freq_1,
+                             freq_1),
+         new_freq_3 = ifelse(freq_1+freq_3>(sum(dimensions[c(1,3)])/2),
+                             max(freq_3)-freq_3,
+                             freq_3)
+         ) %>%
+  group_by(new_freq_1, new_freq_3) %>%
+  summarise(count = sum(count)) %>%
+  rename(freq_1 = new_freq_1,
+         freq_3 = new_freq_3) %>%
+  ggplot() +
+  geom_raster(aes(x = freq_1, y = freq_3, fill = count)) +
+  scale_fill_viridis_c(option = 'B', trans='log1p', breaks = 10^(1:6)) +
+  coord_cartesian(expand=F)
+
+p3 = df %>%
+  mutate(new_freq_2 = ifelse(freq_2+freq_3>(sum(dimensions[c(2,3)])/2),
+                             max(freq_2)-freq_2,
+                             freq_2),
+         new_freq_3 = ifelse(freq_2+freq_3>(sum(dimensions[c(2,3)])/2),
+                             max(freq_3)-freq_3,
+                             freq_3)
+         ) %>%
+  group_by(new_freq_2, new_freq_3) %>%
+  summarise(count = sum(count)) %>%
+  rename(freq_2 = new_freq_2,
+         freq_3 = new_freq_3) %>%
+  ggplot() +
+  geom_raster(aes(x = freq_2, y = freq_3, fill = count)) +
+  scale_fill_viridis_c(option = 'B', trans='log1p', breaks = 10^(1:6)) +
+  coord_cartesian(expand=F)
+
+print(list(p1,p2,p3))
+  
+} else {
+  df = expand.grid(freq_2 = 0:dimensions[2],
+                 freq_1 = 0:dimensions[1]) %>%
+  mutate(count = folded_counts)
+  
+  ggplot(df) +
+  geom_raster(aes(x = freq_1, y = freq_2, fill = count)) +
+  scale_fill_viridis_c(option = 'B', trans='log1p', breaks = 10^(1:6)) +
+  coord_cartesian(expand=F)
+}
+  
+}
+```
+
+Let's apply the function to each species:
+```{r}
+show_SFS('Anchylorhynchus_1')
+```
+
+```{r}
+show_SFS('Anchylorhynchus_2')
+```
+
+```{r}
+show_SFS('Andranthobius_1')
+```
+
+```{r}
+show_SFS('Andranthobius_2')
+```
+
+```{r}
+show_SFS('C_decolor_1')
+```
+
+```{r}
+show_SFS('C_decolor_2')
+```
+
+```{r}
+show_SFS('C_impar')
+```
+
+
+```{r}
+show_SFS('D_polyphaga')
+```
+
+```{r}
+show_SFS('M_bondari_1')
+```
+
+```{r}
+show_SFS('M_ypsilon')
+```
+
+```{r}
+show_SFS('R_rectinasus_1')
+```

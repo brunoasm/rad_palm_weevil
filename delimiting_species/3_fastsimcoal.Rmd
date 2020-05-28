@@ -1,0 +1,232 @@
+---
+title: "Fastsimcoal results"
+author: "Bruno de Medeiros"
+date: "7/18/2018"
+output:
+  html_document:
+    df_print: paged
+  html_notebook:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, rows.print = 12)
+```
+
+Now we have used the folded site frequency spectrum in fastsimcoal to infer whether there is significant migration between clusters defined by k-means.
+
+We did this by inferring simple models of isolation-with-migration with constant population sizes between splitting events. We fit a full model with asymetric migration between all populations and all submodels removing two-way migration between each pair of populations. We will know choose the best model for each species by the Akaike Information Criterion.
+
+After choosing the best model for each species, we will make a table with parameter estimates.
+
+```{r}
+library(tidyverse)
+rm(list=ls())
+```
+
+
+# Model choice
+
+Let's first start by loading results. For each model, we did 100 maximum-likelihood searches and recorded estimates for all of them. We will load this table for each model and select only the search with maximum likelihood. We will then calculate AIC for each model.
+
+Let's load all results in the same table. A few of the runs failed to finish in 7 days and a warning is returned since there are no estimates. We will use `message=FALSE to hide these`. They will still be loaded filled with NA
+```{r message=FALSE}
+all_ML_searches = file.path('..','fastsimcoal','ML_estimates') %>% 
+  list.files() %>%
+  purrr::map_df(~read_delim(file.path('..','fastsimcoal','ML_estimates',.x), delim=' ') %>%
+               mutate(species = str_split(.x,'_model',simplify=T)[1],
+                      model=str_split(.x,'_model_|_ML',simplify=T)[2])) 
+
+all_ML_searches
+```
+Now, let's select the search with maximum likelihood in each model.
+
+```{r}
+ML_results = all_ML_searches %>%
+  group_by(species,model) %>%
+  filter(MaxEstLhood == max(MaxEstLhood,na.rm=T)) %>%
+  ungroup
+
+ML_results
+```
+
+To calculate AIC, we need to know the number of parameters in each model. The easiest way to do it is to count the number of estimates that are NA and subtract that number from the maximum number of parameters.
+
+```{r}
+max_par = ML_results %>%
+  select(starts_with('NPOP'), starts_with('MIG'), starts_with('T'), starts_with('SIZE')) %>%
+  ncol
+
+ML_results = ML_results %>%
+  mutate(Npar = max_par - ML_results %>%
+  select(-ends_with('LHood'),SEARCH_ID,species,model) %>%
+  apply(1,function(x)sum(is.na(x)))
+  )
+```
+
+Now we can calculate AIC and order by it. Let's remove columns with parameter estimates from this table.
+
+It seems there is overwhelming support for a model in which populations are connected in all cases. In the case of R. rectinasus, populations B and C are disconnected, but connected through A.
+
+```{r}
+ML_results = ML_results %>%
+  mutate(AIC=2*Npar-2*MaxEstLhood) %>%
+  arrange(species,AIC) %>%
+  group_by(species) %>%
+  mutate(deltaAIC = AIC-min(AIC),
+         AICw = exp(-deltaAIC/2)/sum(exp(-deltaAIC/2)))
+
+ML_results %>%
+  select(species,model,AIC,deltaAIC,AICw)
+```
+
+Let's save the best model for each species.
+
+```{r}
+best_model = ML_results %>%
+  group_by(species) %>%
+  arrange(AIC) %>%
+  slice(1) %>%
+  select(species,model) %>%
+  ungroup() %>%
+  spread(species,model) %>%
+  unlist
+```
+
+
+
+## Relabeling
+
+We will now relabel populations for **Celetes impar**, so that the label of the populations onto which the others merge is consistently population C and the first merge is CA. The new labels will match those presented in the main text Figure 1.
+
+```{r}
+Cimpar = ML_results %>% filter(species == 'C_impar')
+others =  ML_results %>% filter(species != 'C_impar')
+
+Cimpar = Cimpar %>% 
+  mutate(X = NPOPC,
+                  NPOPC = NPOPB,
+                  NPOPB = NPOPA,
+                  NPOPA = X,
+                  XAC = MIGAC,
+                  XCA = MIGCA,
+                  MIGAC = MIGCB,
+                  MIGCA = MIGBC,
+                  MIGCB = MIGBA,
+                  MIGBC = MIGAB,
+                  MIGBA = XAC,
+                  MIGAB = XCA) %>%
+  select(-starts_with('X'))
+
+ML_results = bind_rows(others, Cimpar) %>%
+  arrange(species,MaxEstLhood)
+```
+
+
+## Parameter rescaling
+
+We will now rescale all parameters so that they are not affected by the unknown mutation rate. 
+
+Let's get the following transformed variables for population size, migration and time:
+
+We used $3\text{e-}9$ as the mutation rate, so now let's define the scaled population size as (fastsimcoal counts number of haploid chromosomes, not diploid individuals):
+$\theta=2N\mu$
+
+The scaled time is:
+$\tau=T\mu$
+
+Effective migration rates (for the sink population) are:
+$\m=\frac{M}{\mu}\theta=2NM$
+
+In all fastsimcoal models, we considered the last population as the sink in historical events, so in the case of two populations 
+POPA -> POPB (backwards in time) at time T1
+
+In the case of 3 populations (backwards in time):
+POPA -> POPC at time T1
+POPB -> POPC at time T2
+
+Let's start by calculating ancestral population sizes:
+```{r}
+fsc_ML = ML_results  %>%
+  select(-Npar) %>%
+  mutate(NANC1 = ifelse(is.na(NPOPC), NPOPB*SIZE1, NPOPC*SIZE1)) %>%
+  mutate(NANC2 = ifelse(is.na(NPOPC), NA,          NANC1*SIZE2))
+
+fsc_ML
+```
+
+Now, let's rescale population sizes and print the best model for each species:
+```{r}
+fsc_ML = fsc_ML %>%
+  mutate_at(vars(starts_with('N')),~.x*3e-9)
+
+fsc_ML %>%
+  filter(model == best_model[species]) %>%
+  select(species,starts_with('N')) %>%
+  group_by(species) %>%
+  mutate_all(sprintf,fmt="%0.2e")
+
+```
+
+Now let's rescale time units:
+```{r}
+fsc_ML = fsc_ML %>%
+  mutate_at(vars(starts_with('T')),~.x*3e-9)
+
+fsc_ML %>%
+  filter(model == best_model[species]) %>%
+  select(species,starts_with('T')) %>%
+  group_by(species) %>%
+  mutate_all(sprintf,fmt="%0.2e")
+```
+
+Finally, let's calculate effective migration rates. We will start by rescaling migrations rates by the mutation rate:
+```{r}
+fsc_ML = fsc_ML %>%
+  mutate_at(vars(starts_with('MIG')),~.x/3e-9)
+  
+fsc_ML %>%
+  filter(model == best_model[species]) %>%
+  select(species,starts_with('MIG')) %>%
+  group_by(species) %>%
+  mutate_all(sprintf,fmt="%0.1f")
+```
+
+Now, let's calculate effective migration rates (in forward time direction):
+```{r}
+fsc_ML = fsc_ML %>%
+  mutate(EMIGBA = MIGAB*NPOPA,
+         EMIGAB = MIGBA*NPOPB,
+         EMIGCA = MIGAC*NPOPA,
+         EMIGAC = MIGCA*NPOPC,
+         EMIGCB = MIGBC*NPOPB,
+         EMIGBC = MIGCB*NPOPC) 
+
+fsc_ML %>%
+  filter(model == best_model[species]) %>%
+  select(species,starts_with('EMIG')) %>%
+  group_by(species) %>%
+  mutate_all(sprintf,fmt="%0.2f")
+```
+
+## Table with estimates
+
+Finally, let's generate a table with all estimates to include in the paper.
+
+```{r}
+to_write = fsc_ML %>% 
+  select(species,model,AIC,deltaAIC,starts_with('N'),starts_with('T'),starts_with('EMIG')) %>%
+  arrange(species,AIC) %>%
+  mutate_at(vars(contains('AIC')),round) %>%
+  mutate_at(vars(starts_with('N')),sprintf,fmt="%0.2e") %>%
+  mutate_at(vars(starts_with('T')),sprintf,fmt="%0.2e") %>%
+  mutate_at(vars(starts_with('EMIG')),sprintf,fmt="%0.2f")
+
+to_write
+
+write_csv(to_write,'./results/fsc_models.csv')
+```
+
+
+
+

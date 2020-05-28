@@ -1,0 +1,233 @@
+---
+title: "Weevil Genotypes"
+output: html_notebook
+---
+
+We used PCAngsd to call genotypes while taking genetic covariance into acount. Here we will load these genotype calls, filter loci by missing data and format data as required by BEDASSLE 2.0.
+
+We will need two packages to manipulate data: reticulate to read the numpy matrices output by PCAngsd and tidyverse to manipulate data in R. We will also import the python module numpy:
+
+```{r}
+library(tidyverse)
+library(reticulate)
+library(bedassle)
+np = import("numpy", convert=FALSE)
+```
+
+Let's first load the table with sample data:
+
+```{r message=FALSE}
+sample_data = readr::read_csv('weevil_data.csv',guess_max = 1000)
+sample_data
+```
+
+As an example, we will now get counts for one species. At the end, we will encapsulate everything in a function and replicate for all species.
+
+Let's start with the species name:
+
+```{r}
+species = 'M_bondari_1'
+```
+
+Now, let's retrieve genotypes for this species as a matrix using reticulate. We will tranpose the matrix so that we have samples on columns and loci on rows.
+```{r}
+gen_path = file.path('..','ANGSD_weevils','PCA',species,'*.geno.npy') %>%
+  Sys.glob()
+genotypes = np$load(gen_path) %>% 
+  as.matrix() %>%
+  t
+
+head(genotypes)
+```
+
+Now, let's place sample names in columns, tranform in data frame and add a column with locus ID. We will also replace -9 with NA to represent missing data.
+
+We can get the samples that were passed to ANGSD using the list of bam files.
+
+```{r}
+bamfile = file.path('..','ANGSD_weevils','PCA',species,'bam.filelist')
+samples = readr::read_lines(bamfile) %>% basename() %>% str_remove('\\..+$')
+str(samples)
+```
+
+Now let's read site names:
+```{r}
+site_path = file.path('..','ANGSD_weevils','PCA',species,'*pca.sites') %>% 
+  Sys.glob()
+sites = readr::read_lines(site_path)
+str(sites)
+```
+
+
+Now let's join samples, loci and genotypes in a single data.frame:
+```{r}
+
+colnames(genotypes) = samples
+
+
+genotypes = genotypes %>% 
+  as_tibble %>%
+  na_if(-9) %>%
+  mutate(site = sites)
+
+genotypes
+```
+
+Now, let's reshape this data.frame so we can add population information:
+```{r}
+genotypes = genotypes %>%
+  gather(key=sample,value=genotype,-site)
+
+genotypes
+```
+
+We are getting there. Now let's add population information from the sample info data.frame:
+
+```{r}
+genotypes = sample_data %>% 
+  select(sample=genomics,population=pop_id_thesis) %>%
+  distinct() %>%
+  right_join(genotypes) %>%
+  mutate(locus = str_remove(site, '_.+$') %>% as.integer)
+```
+
+Now we have all of the data we need, let's filter SNPs. We will retain only one SNP per locus to avoid linked sites, selecting the SNP with least missing data for each locus (and randomly if there is a draw). We will choose a random seed to make this repeatable. Let's start by selecting SNPs:
+
+```{r}
+set.seed(20405)
+sites_to_keep = genotypes %>%
+  group_by(locus,site) %>%
+  summarise(Nmissing=sum(is.na(genotype)),
+            no_SNP=sum(genotype,na.rm=T) == 0) %>%
+  filter(Nmissing == min(Nmissing),
+         no_SNP != TRUE) %>%
+  sample_n(1) %>%
+  pull(site)
+```
+
+
+Now let's keep only sites which were genotyped in all populations
+```{r}
+sites_to_keep = genotypes %>%
+  filter(site %in% sites_to_keep) %>%
+  group_by(site,population) %>%
+  summarise(all_missing=all(is.na(genotype))) %>%
+  group_by(site) %>%
+  summarise(any_pop_missing = any(all_missing)) %>%
+  filter(!any_pop_missing) %>%
+  pull(site)
+```
+
+Finally, let's apply filters and shape the data again as a matrix:
+```{r}
+genotypes = genotypes %>%
+  filter(site %in% sites_to_keep) %>%
+  arrange(sample,site) 
+
+freqs = genotypes %>%
+  select(site,sample,genotype) %>%
+  spread(key = sample, value = genotype) %>%
+  ungroup() %>%
+  select(-site) %>%
+  as.matrix %>%
+  t()
+
+freqs[1:20,1:10]
+  
+```
+
+Finally, let's transform frequencies into pairwise pi, as required by BEDASSLE:
+
+```{r}
+pairwisepi = bedassle::freqs2pairwisePi(freqs = freqs/2)
+```
+
+
+The above was just an example to visualize how this is done, let's now put all operations in a function and retrieve counts and sizes for all species:
+
+```{r}
+get_allele_counts = function(species){
+  gen_path = file.path('..','ANGSD_weevils','PCA',species,'*.geno.npy') %>%
+  Sys.glob()
+genotypes = np$load(gen_path) %>% 
+  as.matrix() %>%
+  t
+  
+bamfile = file.path('..','ANGSD_weevils','PCA',species,'bam.filelist')
+samples = readr::read_lines(bamfile) %>% basename() %>% str_remove('\\..+$')
+
+site_path = file.path('..','ANGSD_weevils','PCA',species,'*pca.sites')  %>% 
+  Sys.glob()
+sites = readr::read_lines(site_path)
+
+colnames(genotypes) = samples
+genotypes = genotypes %>% 
+  as_tibble %>%
+  na_if(-9) %>%
+  mutate(site = sites)
+  
+genotypes = genotypes %>%
+  gather(key=sample,value=genotype,-site)
+
+genotypes = sample_data %>% 
+  select(sample=genomics,population=pop_id_thesis) %>%
+  distinct() %>%
+  right_join(genotypes) %>%
+  mutate(locus = str_remove(site, '_.+$') %>% as.integer)
+  
+sites_to_keep = genotypes %>%
+  group_by(locus,site) %>%
+  summarise(Nmissing=sum(is.na(genotype)),
+            no_SNP=sum(genotype,na.rm=T) == 0) %>%
+  filter(Nmissing == min(Nmissing),
+         no_SNP != TRUE) %>%
+  sample_n(1) %>%
+  pull(site)
+  
+sites_to_keep = genotypes %>%
+  filter(site %in% sites_to_keep) %>%
+  group_by(site,population) %>%
+  summarise(all_missing=all(is.na(genotype))) %>%
+  group_by(site) %>%
+  summarise(any_pop_missing = any(all_missing)) %>%
+  filter(!any_pop_missing) %>%
+  pull(site)
+  
+genotypes = genotypes %>%
+  filter(site %in% sites_to_keep) %>%
+  arrange(sample,site) 
+
+freqs = genotypes %>%
+  select(site,sample,genotype) %>%
+  spread(key = sample, value = genotype) %>%
+  ungroup() %>%
+  select(-site) %>%
+  as.matrix %>%
+  t()
+
+pairwisepi = bedassle::freqs2pairwisePi(freqs = freqs/2)
+  
+return(list(freqs = freqs,pi = pairwisepi))
+}
+```
+
+Now let's apply this function to all species. Again, we will set a random seed to make sure random choices are reproducible.
+
+```{r}
+#the first element is the main dir, so we remove it
+species = list.dirs(file.path('..','ANGSD_weevils','PCA'),
+                    full.names = F,
+                    recursive = F)
+names(species) = species
+
+set.seed(1463713)
+BEDASSLE_data = purrr::map(species,get_allele_counts)
+```
+
+Finally, let's save to use in BEDASSLE later:
+```{r}
+str(BEDASSLE_data)
+save(BEDASSLE_data,file = 'weevils_freq_data.Rdata') 
+```
+
+
