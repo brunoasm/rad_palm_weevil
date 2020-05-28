@@ -18,11 +18,11 @@ These folders contain parameter files and bash scripts used to assemble datasets
 
 ## file_conversion
 
-Scripts used to convert ipyrad output files to nexus and genpop formats, used in analysis for initial species delimitation
+Custom python scripts used to convert ipyrad output files to nexus and genpop formats, used in analysis for initial species delimitation
 
 ## delimiting species
 
-Scripts used in initial delimitation of cryptic weevil species
+Scripts used in initial delimitation of cryptic weevil species and plot PCA results.
 
 ## ANGSD_weevils and ANGSD_plants 
 
@@ -34,7 +34,7 @@ Analyses using [ANGSD](http://www.popgen.dk/angsd/index.php/ANGSD), [PCAngsd](ht
 
 ## bedassle2
 
-Scripts used to run cross-validation for model selection as well as the best model in bedassle2, including evaluation of models.
+Scripts used to run and plot results for cross-validation for model selection as well as the best model in [bedassle2](https://github.com/gbradburd/bedassle).
 
 
 
