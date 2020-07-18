@@ -1,42 +1,37 @@
 ---
-title: "Cross validation results"
-output: html_notebook
+title: "BEDASSLE results"
+output: 
+  html_notebook:
+    df_print: paged
 ---
 
-We used Cannon cluster at Harvard to run bedassle for all species. Now we will load the results and make a table with $\alpha$ parameters inferred.
+We used SLURM to run bedassle for all species in parallel. Now we will load the results and work with the inferences.
+
+In particular, we will evaluate the runs to check if they converged.
+Then we will make IBD plots for all species, including model predictions.
+Finally we will obtain the posterior distribution of $\alpha_{diff} = \alpha_p - \alpha_g$, which shows, across species, the relative importance of geography and host plant.
+
+Finally, we will run a hierarchical model in STAN to test if the distribution of $\alpha_{diff}$can be explained by variation in species interactions. We will also test the power of this test by relabeling species to check if we could detect this with our sample sizes.
 
 ```{r}
+.libPaths('/n/home08/souzademedeiros/R_libs/vdiR/library')
 rm(list=ls())
 library(rstan)
 library(rstantools)
 library(tidyverse)
 library(broom)
 library(ggthemes)
+library(cowplot)
+library(colorspace)
+library(ggnewscale)
 ```
 
-# Get estimates
+# Load HMC results
 
 We will first run one example for **Anchylorhynchus trapezicollis** OTU 1 and then apply the same procedures as a function to all species.
 
-Let's start by loading the table with model chosen for each species by cross validation, so we know how many parameters to expect.
-```{r}
-best_models = readr::read_csv('bedassle_results/best_models.csv')
-best_models
-```
 
-
-It will be easier to use this if we have columns with TRUE/FALSE for each distance matrix, so let's create those columns:
-
-```{r}
-best_models = best_models %>%
-  mutate(geo=str_detect(model,'g'),
-         plant=str_detect(model,'p'),
-         clim=str_detect(model,'c'))
-
-best_models
-```
-
-Now, let's load the rstan model for **Anchylorhynchus trapezicollis** OTU 1:
+Let's load the rstan model for **Anchylorhynchus trapezicollis** OTU 1:
 
 ```{r}
 species = 'Anchylorhynchus_1'
@@ -61,20 +56,8 @@ Now let's change parameter names to reflect to which distance they refer to. We 
 
 ```{r}
 translation = c('alpha2'='$\alpha_2$',
-                'alphaD'='$\alpha_{geo}$')
-
-if (best_models$plant[best_models$species == species] &
-    best_models$clim[best_models$species == species]){
-  translation = c(translation,
-                  c('alphaE[1]' = '$\alpha_{plant}$',
-                    'alphaE[2]' = '$\alpha_{clim}$'))
-} else if (best_models$plant[best_models$species == species]) {
-  translation = c(translation,
-                  c('alphaE[1]' = '$\alpha_{plant}$'))
-} else if (best_models$clim[best_models$species == species]) {
-  translation = c(translation,
-                  c('alphaE[1]' = '$\alpha_{clim}$'))
-}
+                'alphaD'='$\alpha_{geo}$',
+                'alphaE[1]' = '$\alpha_{plant}$') 
 ```
 
 Now it is easy to use this vector.
@@ -84,7 +67,7 @@ estimates = estimates %>%
   mutate(parameter = translation[parameter])
 ```
 
-Now that we know how this works, let's do it for all species.
+Now that we know how this works, let's do it for all species. We will also format numbers as scientific notation.
 
 ```{r}
 get_posteriors = function(species){
@@ -97,7 +80,6 @@ get_posteriors = function(species){
                       pars=intersect(c('alphaE[1]',
                                        'alphaE[2]',
                                        'alpha0',
-                                       'gamma',
                                        'alphaD',
                                        'alpha2'),
                                      names(model.fit))) %>%
@@ -105,27 +87,24 @@ get_posteriors = function(species){
     as.data.frame() %>%
     rownames_to_column('parameter') %>%
     dplyr::select(parameter,mean,`2.5%`,`97.5%`) %>%
-    mutate_at(vars(-parameter),sprintf,fmt='%0.4f') %>%
+    mutate(mean = ifelse(parameter %in% c('alpha0', 'alpha2'),
+                         sprintf(mean, fmt='%0.2f'),
+                         sprintf(mean, fmt='%0.2e')),
+           `2.5%` = ifelse(parameter %in% c('alpha0', 'alpha2'),
+                         sprintf(`2.5%`, fmt='%0.2f'),
+                         sprintf(`2.5%`, fmt='%0.2e')),
+           `97.5%` = ifelse(parameter %in% c('alpha0', 'alpha2'),
+                         sprintf(`97.5%`, fmt='%0.2f'),
+                         sprintf(`97.5%`, fmt='%0.2e')),
+           ) %>%
     mutate(posterior=str_c(mean,' (',`2.5%`,'--',`97.5%`,')')) %>%
     dplyr::select(parameter, posterior)
   
   translation = c('alpha2'='$\\alpha_2$',
                   'alpha0'='$\\alpha_0$',
                   'gamma'='$\\gamma$',
-                  'alphaD'='$\\alpha_{geo}$')
-  
-  if (best_models$plant[best_models$species == species] &
-      best_models$clim[best_models$species == species]){
-    translation = c(translation,
-                    c('alphaE[1]' = '$\\alpha_{plant}$',
-                      'alphaE[2]' = '$\\alpha_{clim}$'))
-  } else if (best_models$plant[best_models$species == species]) {
-    translation = c(translation,
-                    c('alphaE[1]' = '$\\alpha_{plant}$'))
-  } else if (best_models$clim[best_models$species == species]) {
-    translation = c(translation,
-                    c('alphaE[1]' = '$\\alpha_{clim}$'))
-  }
+                  'alphaD'='$\\alpha_{geo}$',
+                  'alphaE[1]' = '$\\alpha_{plant}$')
   
   return(estimates %>%
            mutate(parameter = translation[parameter]))
@@ -143,28 +122,38 @@ names(spp) = spp
 spp
 ```
 
-Before getting the estimates, let's make sure that the HMC ran well, using shinystan to diagnose the runs. The interactive shinystan page will open in a separate window.
+Before getting the estimates, let's make sure that the HMC ran well, using shinystan to diagnose the runs. The interactive shinystan page will open in a separate window. 
 
 ```{r}
-for (sp in spp){
-  rm(model.fit)
-  load(str_c('bedassle_results/',sp,'_model.fit.Robj'))
-  readline(prompt = 'Press any key to continue')
-  shinystan::launch_shinystan(model.fit)
-}
+#for (sp in spp){
+#  rm(model.fit)
+#  load(str_c('bedassle_results/',sp,'_model.fit.Robj'))
+#  shinystan::launch_shinystan(model.fit)
+#}
 
 ```
 
+We can also summarize divergences and other problems for each run:
 
+```{r}
+for (sp in spp){
+  cat('=========================\n')
+  cat(sp)
+  cat('\n')
+  rm(model.fit)
+  load(str_c('bedassle_results/',sp,'_model.fit.Robj'))
+  rstan::check_hmc_diagnostics(model.fit)
+}
+```
 
 Now let's get a dataframe with estimates for all species:
 
 ```{r}
-rm(model.fit)
 all_spp_par = purrr::map_df(spp,get_posteriors,.id = 'species')
+all_spp_par
 ```
 
-# Make table
+# Make supplementary table
 
 Finally, we just need to reshape the data frame to put it in the paper. Let's save it as a csv file for further editing.
 ```{r}
@@ -176,7 +165,7 @@ bedassle_table
 write_csv(bedassle_table,'bedassle_results/final_table.csv')
 ```
 
-# Make figure
+# Make IBD figure
 
 Now let's make a figure with pairwise pi against geographical, plant and climate distances for all species. 
 
@@ -198,7 +187,7 @@ ppi = purrr::map_df(BEDASSLE_data,~bedassle::freqs2pairwisePi(.x$freqs/2) %>%
          sample2 = item2,
          pi = distance)
 
-ppi %>% head
+ppi
 ```
 
 Now let's load data on the other distances and combine in this table.
@@ -235,15 +224,8 @@ ppi =  ppi %>%
                    'pop2'='item2')) %>%
   rename(plant_dist=distance)
 
-#ppi =  ppi %>%
-#  left_join(clim_dist %>%
-#              as.dist() %>%
-#              broom::tidy(diagonal=T, upper=F),
-#            by = c('pop1'='item1',
-#                   'pop2'='item2')) %>%
-#  rename(clim_dist=distance)
 
-ppi %>% head
+ppi
 
 ```
 
@@ -254,7 +236,7 @@ ppi = ppi %>%
   gather(key='variable',value='distance',ends_with('dist')) %>%
   filter(!is.na(distance))
 
-ppi %>% head
+ppi
 ```
 
 Before plotting, let's add information about insect-plant interactions
@@ -270,7 +252,7 @@ ecology = data.frame(species = spp,
 ppi = ppi %>% 
   left_join(ecology)
 
-ppi %>% head
+ppi
 ```
 
 Before plotting, let's order factors so that plot panels are in the order we want.
@@ -393,34 +375,10 @@ get_average_estimates = function(species){
   translation = c('gamma' = 'gamma',
                   'alpha2'='alpha_2',
                   'alphaD'='alpha_g',
-                  'alpha0'='alpha_0')
-  if ('alphaD' %in% estimates$parameter) {
-    norms = list('norm_g' = data.block$sd.geoDist)
-  } else {
-    norms = list()
-  }
-  
-  
-  if (best_models$plant[best_models$species == species] &
-      best_models$clim[best_models$species == species]){
-    translation = c(translation,
-                    c('alphaE[1]' = 'alpha_p',
-                      'alphaE[2]' = 'alpha_c'))
-    norms['norm_p'] = data.block$sd.envDist[1]
-    norms['norm_c'] = data.block$sd.envDist[2]
-    
-  } else if (best_models$plant[best_models$species == species]) {
-    translation = c(translation,
-                    c('alphaE[1]' = 'alpha_p'))
-    
-    norms['norm_p'] = data.block$sd.envDist
-    
-  } else if (best_models$clim[best_models$species == species]) {
-    translation = c(translation,
-                    c('alphaE[1]' = 'alpha_c'))
-    
-    norms['norm_c'] = data.block$sd.envDist
-  }
+                  'alpha0'='alpha_0',
+                  'alphaE[1]' = 'alpha_p')
+  norms = list('norm_g' = data.block$sd.geoDist,
+               'norm_p' = data.block$sd.envDist[[1]])
   
   estimates = estimates %>%
            mutate(parameter = translation[parameter]) %>%
@@ -439,10 +397,8 @@ bedassle_averages = purrr::map_df(spp,get_average_estimates,.id = 'species') %>%
                                      "alpha_2",
                                      "alpha_g",
                                      "alpha_p",
-                                     "alpha_c",
                                      "norm_g",
-                                     "norm_p",
-                                     "norm_c" )
+                                     "norm_p" )
                             )) %>%
   complete(species,parameter, fill=list(mean = 0))
 
@@ -606,6 +562,9 @@ Let's also try making a more horizontal figure to fit the page better. For that,
 ```{r}
 
 clrs = RColorBrewer::brewer.pal(3,'Accent')
+clrs_light = colorspace::lighten(clrs,0.5)
+
+
 names(clrs) = c('Brood pollinator', 'Live tissue breeder', 'Dead tissue breeder')
 
 var_labels = c('clim_dist' = 'Precipitation\n(mm)',
@@ -695,6 +654,7 @@ print(p2)
 
 p = cowplot::plot_grid(p1,p2,ncol = 2)
 
+print(p)
 
 ggsave(filename = './figures/gen_cov_split.pdf',
        plot = p, 
@@ -705,5 +665,454 @@ ggsave(filename = './figures/gen_cov_split.pdf',
 
 ```
 
+# Testing overall effect
 
 
+## Fit meta-analysis model
+In addition to the plots on individual species, let's summarize, for each species, the posterior distribution of $\alpha_{dif}$, which is the difference in contribution between plant genetic distance and geography. 
+
+Let's first define a function that pulls posterior draws of $\alpha_p$ and $\alpha_g$
+
+```{r}
+post_diff = function(species){
+  
+  load(str_c('bedassle_results/',species,'_model.fit.Robj'))
+  
+  
+  
+  estimates = rstan::extract(model.fit, 
+                      pars=intersect(c('alphaE[1]',
+                                       'alphaD'),
+                                     names(model.fit))) %>%
+    as_tibble %>%
+    rename(aE=1, aD=2)
+ 
+  
+  return(estimates)
+}
+```
+
+Now let's apply this function, calculate the difference and add information about species.
+```{r}
+rm(model.fit)
+pardifs = purrr::map_df(spp,post_diff,.id = 'species') %>%
+  mutate(dif = aE-aD) %>%
+  left_join(ecology) %>%
+  mutate(interaction = factor(interaction,
+                              ordered=T,
+                              levels=c('Brood pollinator', 
+                                       'Live tissue breeder',
+                                       'Dead tissue breeder'))) %>%
+  mutate(species = factor(species,
+                          ordered = T,
+                          levels = c(
+                            'Anchylorhynchus_1'  ,
+                            'Anchylorhynchus_2'  ,
+                            'Anchylorhynchus_3'  ,
+                            'M_bondari_1'        ,
+                            'M_bondari_2'        ,
+                            'M_ypsilon'          ,
+                            'R_rectinasus_1'     ,
+                            'Andranthobius_1'    ,
+                            'Andranthobius_2'    ,
+                            'C_decolor_1'        ,
+                            'C_decolor_2'        ,
+                            'C_impar'            ,
+                            'D_polyphaga'        ,
+                            'P_cocoseae')
+  ))
+
+pardifs
+```
+
+Now let's summarize confidence intervals to plot posterior distributions.
+```{r}
+dif_sums = pardifs %>%
+  group_by(species) %>%
+  summarise(ave = mean(dif),
+            l50 = quantile(dif,0.25),
+            u50 = quantile(dif,0.75),
+            l95 = quantile(dif,0.025),
+            u95 = quantile(dif,0.975),
+            interaction = unique(interaction)) %>%
+  mutate(species = fct_reorder(species, ave),
+         pos = ifelse(ave>0, -0.35, 0.35),
+         just = ifelse(ave>0, 0, 1)) 
+
+dif_sums
+```
+
+Let's the distribution of $\alpha_{diff}$, ordering species by the mean estimate.
+
+```{r}
+p1 = ggplot(dif_sums) +
+  geom_abline(intercept = 0,slope = 0, color = 'gray90') +
+  geom_linerange(aes(x = species, ymin = l95, ymax = u95, color = interaction),
+                 show.legend = F) +
+  scale_color_manual(values = clrs_light, name = 'Interaction') +
+  ggnewscale::new_scale_color()+
+  geom_linerange(aes(x = species, ymin = l50, ymax = u50, color = interaction),
+                 size=1.3,
+                 show.legend = F) +
+  geom_point(aes(x = species, y = ave, color = interaction),
+             fill = 'white',
+             stroke = 1.5,
+             shape = 21,
+             size = 1.5) +
+  scale_color_manual(values = clrs, name = 'Interaction') +
+  scale_fill_manual(values = clrs_light, name = 'Interaction') +
+  #geom_errorbar(aes(x = species, ymin = ave, ymax=ave, color = interaction)) +
+  #geom_text(aes(x=species,y=pos,label=species,hjust=just), parse=T, size = 3) +
+  guides(color = guide_legend(override.aes = list(size = 1.5))) +
+  ylab(expression(alpha[diff])) +
+  coord_flip()+
+  xlab("Species") +
+  ylim(c(-0.35,0.35)) +
+  theme_few() +
+  theme(axis.text.y = element_blank(),
+        legend.position = c(0.99,0.01),
+        legend.justification = c(1,0),
+        text=element_text(size=9),
+        legend.text = element_text(size=6),
+        legend.key.size = unit(8, 'pt'),
+        legend.title = element_text(size=7)) 
+
+print(p1)
+  
+```
+
+
+It does not look like there is a strong association between mode of interaction and whether plants drive diversification. Let's use a meta-analysis model to test whether being a pollinator decreases this difference and being an antagonist increases it. For each species, let's record the average $\alpha_{diff}$, the standard deviation, and whether they are pollinators or antagonists.
+
+```{r}
+stan_df = pardifs %>%
+  group_by(species) %>%
+  summarise(y=mean(dif), sigma=sd(dif)) %>%
+  left_join(ecology) %>%
+  mutate(pollinator = str_detect(interaction, 'pollinator'),
+         antagonist = !str_detect(interaction, 'Dead')) %>%
+  select(-interaction) %>%
+  arrange(y)
+
+stan_df 
+```
+
+Now let's build an hierarchical model in Stan that assumes that the estimate for each species is result of their interaction type plus a random fluctuation to be estimated. An example can be found [here](https://devinincerti.com/2015/10/31/bayesian-meta-analysis.html).
+
+```{stan output.var=meta_model}
+data {
+  int<lower=0> N; // number of species
+  real y[N]; // estimated difference of plant/space
+  real<lower=0> sigma[N]; // sd of estimated difference
+  int pollinator[N]; // whether species is a pollinator
+  int antagonist[N]; // whether species is antagonist
+}
+parameters {
+  real mu; 
+  real pol;
+  real ant;
+  real<lower=0> tau;
+  real eta[N];
+}
+transformed parameters {
+  real theta[N];
+  for (j in 1:N)
+    //theta[j] = mu + pol * pollinator[j] + ant * antagonist[j] + tau * eta[j];
+    //theta[j] = mu + tau * eta[j];
+    theta[j] = mu + tau * eta[j] + ant * antagonist[j] + pol * pollinator[j];
+}
+model {
+  mu ~ std_normal();
+  tau ~ std_normal();
+  eta ~ std_normal();
+  pol ~ std_normal();
+  ant ~ std_normal();
+  y ~ normal(theta, sigma);
+}
+generated quantities {
+  real yrep[N]; //posterior predictive simulations
+  yrep = normal_rng(theta, sigma);
+}
+```
+
+
+
+Let's now run the model.
+
+```{r}
+stan_input = as.list(stan_df)
+stan_input$N = nrow(stan_df)
+#stan_input$y = (stan_input$y- mean(stan_input$y))/sd(stan_input$y)
+str(stan_input)
+```
+
+```{r}
+fit = sampling(meta_model,
+               seed = 1986317581,
+               data = stan_input, 
+               iter = 2000, 
+               chains = 4,
+               cores = 4,
+               refresh = 2000,
+               control = list(adapt_delta = 0.98, max_treedepth = 17))
+```
+
+## Model check
+```{r}
+shinystan::launch_shinystan(fit)
+```
+
+To check if the model is doing a good job in fitting observations, let's plot $\alpha_{diff}$ that was used as input data agains posterior predictive draws:
+
+```{r}
+pps = rstan::extract(fit, pars='yrep',permuted=TRUE) %>%
+  (function(x)x[[1]]) %>%
+  t %>%
+  as.data.frame %>%
+  mutate(species = stan_df$species) %>%
+  gather(key='iteration',value='yrep',-species) %>%
+  mutate(species = factor(species,ordered = T,levels=levels(dif_sums$species))) %>%
+  group_by(species) %>%
+  slice(1:500)
+
+pps
+```
+
+
+
+```{r}
+p = ggplot(dif_sums) +
+  geom_abline(intercept = 0,slope = 0, color = 'gray90') +
+  geom_jitter(aes(x=species,y=yrep),data=pps,alpha=0.1) +
+  geom_linerange(aes(x = species, ymin = l95, ymax = u95, color = interaction),
+                 show.legend = F) +
+  scale_color_manual(values = clrs_light, name = 'Interaction') +
+  ggnewscale::new_scale_color()+
+  geom_linerange(aes(x = species, ymin = l50, ymax = u50, color = interaction),
+                 size=1.3,
+                 show.legend = F) +
+  geom_point(aes(x = species, y = ave, color = interaction),
+             fill = 'white',
+             stroke = 1.5,
+             shape = 21,
+             size = 1.5) +
+  scale_color_manual(values = clrs, name = 'Interaction') +
+  scale_fill_manual(values = clrs_light, name = 'Interaction') +
+  #geom_errorbar(aes(x = species, ymin = ave, ymax=ave, color = interaction)) +
+  #geom_text(aes(x=species,y=pos,label=species,hjust=just), parse=T, size = 3) +
+  guides(color = guide_legend(override.aes = list(size = 1.5))) +
+  ylab(expression(alpha[diff])) +
+  coord_flip()+
+  xlab("Species") +
+  ylim(c(-0.35,0.35)) +
+  theme_few() +
+  theme(axis.text.y = element_blank(),
+        legend.position = c(0.98,0.02),
+        legend.justification = c(1,0),
+        text=element_text(size=9)) 
+  
+print(p)
+
+ggsave('figures/posterior_predictions_meta.pdf',
+       p,
+       device='pdf',
+       width=168,
+       height=168*3/4,
+       units = 'mm',
+       useDingbats=F)
+
+```
+
+It seems we are inferring with a little more variance than the original data, but the model is capturing the correct posterior estimates.
+
+
+Let's now plot the posterior estimates.
+
+```{r}
+p2 = summary(fit, pars=c('ant','pol'))$summary %>%
+  as.data.frame() %>%
+  rownames_to_column('parameter') %>%
+  #mutate(parameter=c('expression(gamma[a])','expression(gamma[p])')) %>%
+  ggplot() +
+  geom_abline(intercept = 0,slope = 0, color = 'gray90') +
+  geom_linerange(aes(x = parameter, ymin = `2.5%`, ymax = `97.5%`),
+                 color='gray70',
+                 show.legend = F) +
+  geom_linerange(aes(x = parameter, ymin = `25%`, ymax = `75%`), 
+                 color='gray50',
+                 size = 1.3,
+                 show.legend = F) +
+  geom_point(aes(x = parameter, y = mean),
+             color='gray50',
+             fill = 'white',
+             stroke = 1.5,
+             shape = 21,
+             size = 1.5) +
+  #geom_errorbar(aes(x = parameter, ymin = mean, ymax=mean),
+  #              color='gray50') +
+  scale_x_discrete(labels=parse(text=c('gamma[ant]','gamma[pol]'))) +
+  ylab(expression(Estimated~effect~on~alpha[diff])) +
+  xlab("Parameter") +
+  coord_flip() +
+  ylim(c(-0.35,0.35)) +
+  theme_few()+
+  theme(legend.position='bottom',
+        text = element_text(size=9),
+        axis.text.y = element_text(size=9))
+
+print(p2)
+  
+```
+
+Pollination does not seem to have a significant effect, and antagonism has a small effect but nonsignificant if we consider the whole posterior interval. Maybe with this sample size we do not have enough power to detect differences? To test, let's relabel our input data and consider that the top 3 species are antagonists, the next 3 are brood pollinators and remaining seven are commensals. We will fit the model and plot posterior estimates.
+
+```{r}
+stan_fake = stan_input
+
+stan_fake$pollinator = c(rep(FALSE,7),rep(TRUE,3),rep(FALSE,3))
+stan_fake$antagonist = c(rep(FALSE,7),rep(TRUE,6))
+
+fake.fit = sampling(meta_model,
+               seed = 9761,
+               data = stan_fake, 
+               iter = 2000, 
+               chains = 4,
+               cores = 4,
+               refresh = 2000,
+               control = list(adapt_delta = 0.98, max_treedepth = 17))
+```
+
+```{r}
+shinystan::launch_shinystan(fake.fit)
+```
+
+
+```{r}
+bayesplot::mcmc_intervals(as.array(fake.fit), pars = c('pol','ant'))
+```
+
+
+# Meta-analysis figures
+
+Let's now prepare a final figure for the meta-analysis results, usign cowplot.
+
+```{r}
+p = cowplot::plot_grid(p1,
+                       p2,
+                   ncol=1,
+                   rel_heights = c(0.7,0.2),
+                   align='v',
+                   axis=c('lr'),
+                   labels = 'auto',
+                   label_y = c(1,1.5))
+
+print(p)
+
+ggsave('figures/meta_results.pdf',
+       p,
+       device='pdf',
+       width=168/2,
+       height=100,
+       units = 'mm',
+       useDingbats=F)
+
+```
+
+Let's also export a figure for supplementary material with the relabelled data to test the power of the test.
+```{r}
+fake_dif_sums = dif_sums %>% arrange(ave)
+fake_dif_sums$interaction = factor(c(rep("Dead tissue breeder", 7),
+                              rep("Brood pollinator", 3),
+                              rep("Live tissue breeder", 3)),
+                              levels = c("Brood pollinator",
+                                         "Live tissue breeder",
+                                         "Dead tissue breeder"))
+
+p1 = ggplot(fake_dif_sums) +
+  geom_abline(intercept = 0,slope = 0, color = 'gray90') +
+  geom_linerange(aes(x = species, ymin = l95, ymax = u95, color = interaction),
+                 show.legend = F) +
+  scale_color_manual(values = clrs_light, name = 'Interaction') +
+  ggnewscale::new_scale_color()+
+  geom_linerange(aes(x = species, ymin = l50, ymax = u50, color = interaction),
+                 size=1.3,
+                 show.legend = F) +
+  geom_point(aes(x = species, y = ave, color = interaction),
+             fill = 'white',
+             stroke = 1.5,
+             shape = 21,
+             size = 1.5) +
+  scale_color_manual(values = clrs, name = 'Interaction') +
+  scale_fill_manual(values = clrs_light, name = 'Interaction') +
+  #geom_errorbar(aes(x = species, ymin = ave, ymax=ave, color = interaction)) +
+  #geom_text(aes(x=species,y=pos,label=species,hjust=just), parse=T, size = 3) +
+  guides(color = guide_legend(override.aes = list(size = 1.5))) +
+  ylab(expression(alpha[diff])) +
+  coord_flip()+
+  xlab("Species") +
+  ylim(c(-0.35,0.35)) +
+  theme_few() +
+  theme(axis.text.y = element_blank(),
+        legend.position = c(0.99,0.01),
+        legend.justification = c(1,0),
+        text=element_text(size=9),
+        legend.text = element_text(size=6),
+        legend.key.size = unit(8, 'pt'),
+        legend.title = element_text(size=7)) 
+
+print(p1)
+
+p2 = summary(fake.fit, pars=c('ant','pol'))$summary %>%
+  as.data.frame() %>%
+  rownames_to_column('parameter') %>%
+  #mutate(parameter=c('expression(gamma[a])','expression(gamma[p])')) %>%
+  ggplot() +
+  geom_abline(intercept = 0,slope = 0, color = 'gray90') +
+  geom_linerange(aes(x = parameter, ymin = `2.5%`, ymax = `97.5%`),
+                 color='gray70',
+                 show.legend = F) +
+  geom_linerange(aes(x = parameter, ymin = `25%`, ymax = `75%`), 
+                 color='gray50',
+                 size = 1.3,
+                 show.legend = F) +
+  geom_point(aes(x = parameter, y = mean),
+             color='gray50',
+             fill = 'white',
+             stroke = 1.5,
+             shape = 21,
+             size = 1.5) +
+  #geom_errorbar(aes(x = parameter, ymin = mean, ymax=mean),
+  #              color='gray50') +
+  scale_x_discrete(labels=parse(text=c('gamma[ant]','gamma[pol]'))) +
+  ylab(expression(Estimated~effect~on~alpha[diff])) +
+  xlab("Parameter") +
+  coord_flip() +
+  ylim(c(-0.35,0.35)) +
+  theme_few()+
+  theme(legend.position='bottom',
+        text = element_text(size=9),
+        axis.text.y = element_text(size=9))
+
+print(p2)
+
+
+
+p = cowplot::plot_grid(p1,p2,
+                   ncol=1,
+                   rel_heights = c(0.7,0.2),
+                   align='v',
+                   axis=c('lr'),
+                   labels = 'auto',
+                   label_y = c(1,1.5))
+
+print(p)
+
+ggsave('figures/meta_supplement.pdf',
+       p,
+       device='pdf',
+       width=168,
+       height=100,
+       units = 'mm',
+       useDingbats=F)
+
+```

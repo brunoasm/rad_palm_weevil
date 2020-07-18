@@ -559,7 +559,7 @@ ggsave(filename = 'figures/PCA_map_commensals.pdf',
 
 ```
 
-We will manually insert some information in this graph:
+We will manually insert some information in this graph using Adobe Illustrator:
 * variance explained by PC axes
 * spatial extent of k-means clusters
 * an inset with color space mapped on PC axes
@@ -589,6 +589,26 @@ PCA_map_df %>%
   summarise(pops=paste(unique(population),collapse=','))
   
 ```
+
+For reference, these are the population coordinates:
+
+```{r}
+pop_locs = readr::read_csv('sample_info/sample_data.csv') %>%
+              dplyr::select(population=pop_id_thesis, lat, lon) %>%
+  group_by(population) %>%
+  summarize_all(mean)
+
+ggplot(pop_locs, aes(x=lon,y=lat)) +
+  map_layer +
+  geom_text(aes(label=population)) +
+  coord_equal()
+  
+
+  
+
+```
+
+
 
 Let's also plot a graph that will work as a guide:
 
@@ -921,8 +941,6 @@ plyr::llply(plant_eig,
 ```
 
 
-
-
 # Prepare for fastsimcoal
 
 Now the question is: is there gene flow between clusters? 
@@ -939,4 +957,3 @@ tb1
 
 readr::write_csv(tb1, path = 'results/DAPC_clusters.csv')
 ```
-

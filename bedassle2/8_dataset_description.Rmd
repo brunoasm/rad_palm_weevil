@@ -7,7 +7,7 @@ Now we will generate a table describing the dataset, with number of loci/sites i
 
 The number of pairwise high-coverage loci is already shown in supplementary Figure S2, so here we will focus on the datasets after splitting cryptic species.
 
-We will report in this table the total number of samples and of SNPs per species, as well as number of SNPs included in bedassle analyses.
+We will report in this table the total number of samples and of SNPs per species, as well as number of RAD loci and of SNPs included in bedassle analyses. All of these are after removing sites not in HWE equilibrium.
 
 Let's start by getting statistics for plants. First, number of samples and populations.
 ```{r}
@@ -34,12 +34,17 @@ plant_data
 
 Now, number of SNPs
 ```{r}
-#read_delim('angsd_plants/botryophora.pca.post.beagle',delim='\t')
-plant_data$SNPs = plant_data$species %>%
-  purrr::map(~length(scan(str_c('../ANGSD_plants/',.x,'/pca.post.beagle'),
-     what = 'character',
-     sep = '\n')) - 1) %>%
-  unlist
+get_plant_stats = function(x){
+  markers = read_delim(str_c('../ANGSD_plants/',x,'/pca.post.beagle'),delim='\t')[[1]]
+  data.frame(species = x, 
+             SNPs = length(markers),
+             N_loci = length(unique(str_split(markers, pattern = '_',simplify = T)[,1])))
+       }
+
+
+plant_data = plant_data$species %>%
+  purrr::map_df(get_plant_stats) %>%
+  right_join(plant_data)
 
 plant_data
 ```

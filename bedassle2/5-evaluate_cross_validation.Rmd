@@ -1,6 +1,8 @@
 ---
 title: "Cross validation results"
-output: html_notebook
+output: 
+  html_notebook:
+    df_print: "paged"
 ---
 
 We parallelized cross validation for all species. Now we will collect the results to infer the best model for each species.
@@ -138,6 +140,15 @@ all_xval = purrr::map_df(spp,
 
 all_xval
 ```
+
+Let's now save a table with species, model and predictive value for the supplementary material.
+
+```{r}
+all_xval %>%
+  select(species,model,predictive_value) %>%
+  write_csv(path='xval_results/pred_table.csv')
+```
+
 
 For proceeding with BEDASSLE, we will choose, for each species, the model with the least parameters among those with equally high predictive power (i. e. overlapping intervals). If more than one model with same number of parameters, we will choose the one with highest average predictive power.
 
