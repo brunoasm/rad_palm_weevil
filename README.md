@@ -2,9 +2,7 @@
 
 This repository contains code used in analyses and to produce figures for the following bioRxiv preprint:
 
-Evaluating species interactions as a driver of phytophagous insect divergence
-Bruno A. S. de Medeiros, Brian D. Farrell
-bioRxiv 842153; doi: https://doi.org/10.1101/842153
+de Medeiros BAS & Farrell BD. 2019. Evaluating species interactions as a driver of phytophagous insect divergence. bioRxiv 842153. doi: https://doi.org/10.1101/842153
 
 Most of the R code was written as Rmarkdown files, and the html output including results and plots is also provided.
 
