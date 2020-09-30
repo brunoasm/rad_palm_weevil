@@ -6,7 +6,7 @@
 #SBATCH --mem 10G # Memory pool for all cores (see also --mem-per-cpu)
 #SBATCH -o angsd_gl_%A.out # File to which STDOUT will be written
 
-# We will use ANGSD to generate PCA plots, which we will use to calculate population distances
+# Here we calculate genotype likelihoods with ANGSD again, but ignoring RAD loci failing HWE test 
 
 #module load angsd/0.920-fasrc01 samtools
 module load angsd/0.930-fasrc01 samtools

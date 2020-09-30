@@ -6,7 +6,7 @@
 #SBATCH --mem 10G # Memory pool for all cores (see also --mem-per-cpu)
 #SBATCH -o angsd_%A.out # File to which STDOUT will be written
 
-# We will use ANGSD to generate PCA plots, which we will use to calculate population distances
+#See comments on ANGSD_weevils folder for explanation on what this script does 
 
 module load angsd/0.920-fasrc01 samtools
 

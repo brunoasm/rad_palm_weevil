@@ -6,7 +6,8 @@
 #SBATCH --mem 10000 # Memory pool for all cores (see also --mem-per-cpu)
 #SBATCH -o hwe_%A.out # File to which STDOUT will be written
 
-# We will use ANGSD to generate PCA plots, which we will use to calculate population distances
+# Here we use genotype likelihoods to test sites for HWE while accounting for population structure.
+# We then make a list of RAD loci with at least one site failing HWE 
 
 module load python
 source activate pcangsd

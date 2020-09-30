@@ -5,12 +5,13 @@
 #SBATCH -p test # Partition to submit to
 #SBATCH --mem 10G # Memory pool for all cores (see also --mem-per-cpu)
 #SBATCH -o angsd_%A.out # File to which STDOUT will be written
-# We will use ANGSD to generate PCA plots, which we will use to calculate population distances
 
 module load GCC/8.2.0-2.31.1 angsd/0.920-fasrc01 gsl/2.6-fasrc01
 
 
-t seems threading does not really speed up angsd, so we will run in only one core 
+# Here we use ngsDist to calculate pairwise distances between all plant samples.
+
+# It seems threading does not really speed up angsd, so we will run in only one core 
 
 # run angsd to obtain genotype likelihoods
 # options used:

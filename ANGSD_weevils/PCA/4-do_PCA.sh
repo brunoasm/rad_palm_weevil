@@ -6,7 +6,9 @@
 #SBATCH --mem 10000 # Memory pool for all cores (see also --mem-per-cpu)
 #SBATCH -o pcangsd_%A.out # File to which STDOUT will be written
 
-# We will use ANGSD to generate PCA plots, which we will use to calculate population distances
+# We will use PCAngsd to calculate genetic covariances between samples and posterior genotype probabilities
+# We will also call genotypes with a 0.8 threshold.
+# Loci not in HWE were already filtered
 
 module load Anaconda
 source activate pcangsd

@@ -8,9 +8,9 @@
 
 # We will use ANGSD for PCA and sife frequency spectra, but before we need to filter out potentially paralogous sites
 # Some of them were filtered during assembly with ipyrad, but site frequency spectra still show a lot of heterozygotes
-# For this reason, for each morphospecies, we will loop through populations and generate SNP statistics
-# We will then filter out sites that fail the HWE in any population
-# In this script, we will just do the statistics
+# For this reason, for each morphospecies, we will filter loci by HWE while considering population structure 
+# This is done in PCAngsd, but we need to calculate genotype likelihoods with angsd first.
+# Below we do that for each morphospecies.
 
 module load angsd/0.930-fasrc01 samtools
 
