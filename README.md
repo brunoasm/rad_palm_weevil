@@ -1,8 +1,8 @@
 # Description
 
-This repository contains code used in analyses and to produce figures for the following bioRxiv preprint:
+This repository contains code used in analyses and to produce figures for:
 
-de Medeiros BAS & Farrell BD. 2019. Evaluating species interactions as a driver of phytophagous insect divergence. bioRxiv 842153. doi: https://doi.org/10.1101/842153
+de Medeiros, B.A.S., Farrell, B.D. Evaluating insect-host interactions as a driver of species divergence in palm flower weevils. Commun Biol 3, 749 (2020). https://doi.org/10.1038/s42003-020-01482-3
 
 Most of the R code was written as Rmarkdown files, and the html output including results and plots is also provided.
 
